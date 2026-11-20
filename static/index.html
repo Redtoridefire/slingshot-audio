@@ -121,11 +121,8 @@
 
 <dialog id="keysDlg">
   <h3>API keys</h3>
-  <p>Saved to the <code>.env</code> file on this computer only (readable by your user account). Keys are never shown again or sent anywhere except Anthropic and Deepgram. Leave a box empty to keep the current key.</p>
-  <label>Anthropic API key <span class="kstat" id="k_anthropic"></span></label>
-  <input id="in_anthropic" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
-  <label>Deepgram API key <span class="kstat" id="k_deepgram"></span></label>
-  <input id="in_deepgram" type="password" autocomplete="off" spellcheck="false" placeholder="from console.deepgram.com">
+  <p>Saved to the <code>.env</code> file on this computer only (readable by your user account). Keys are never shown again, and each one is sent only to its own provider. Leave a box empty to keep the current key.</p>
+  <div id="keyRows"></div>
   <p id="keyMsg" style="margin-top:10px"></p>
   <div class="row">
     <button id="testKeys">Test keys</button>
@@ -199,15 +196,27 @@ function setLevels(lv) {
 }
 function setCost(c) {
   $("cost").textContent = "$" + c.total.toFixed(3);
-  $("cost").title = `Estimated cost of this conversation\nClaude: $${c.claude.toFixed(3)} (${c.tokens.in + c.tokens.cache_read + c.tokens.cache_write} in / ${c.tokens.out} out tokens, ${c.tokens.cache_read} from cache)\nDeepgram: $${c.deepgram.toFixed(3)} (${c.audio_min} min of audio)`;
+  $("cost").title = `Estimated cost of this conversation\n${c.llm_provider}: $${c.llm.toFixed(3)} (${c.tokens.in + c.tokens.cache_read + c.tokens.cache_write} in / ${c.tokens.out} out tokens, ${c.tokens.cache_read} from cache)\nSpeech-to-text (${c.stt_provider}): $${c.stt.toFixed(3)} (${c.audio_min} min of audio)`;
 }
 
+const KEY_INFO = {
+  anthropic: ["Anthropic API key", "sk-ant-… from console.anthropic.com"],
+  openai: ["OpenAI API key", "sk-… from platform.openai.com"],
+  deepgram: ["Deepgram API key", "from console.deepgram.com"],
+  assemblyai: ["AssemblyAI API key", "from assemblyai.com/dashboard"],
+};
+const KEY_NAMES = { anthropic: "Anthropic", openai: "OpenAI", deepgram: "Deepgram", assemblyai: "AssemblyAI" };
 function showKeys(keys) {
-  for (const k of ["anthropic", "deepgram"]) {
-    const s = keys[k], el = $("k_" + k);
-    el.textContent = s.set ? `set ${s.hint}` : "not set"; el.className = "kstat " + (s.set ? "ok" : "bad");
+  const rows = $("keyRows");
+  for (const [k, s] of Object.entries(keys)) {
+    if (!s.needed) continue;
+    if (!$("in_" + k)) rows.insertAdjacentHTML("beforeend",
+      `<label>${KEY_INFO[k][0]} <span class="kstat" id="k_${k}"></span></label><input id="in_${k}" type="password" autocomplete="off" spellcheck="false" placeholder="${KEY_INFO[k][1]}">`);
+    const el = $("k_" + k); el.textContent = s.set ? `set ${s.hint}` : "not set"; el.className = "kstat " + (s.set ? "ok" : "bad");
   }
 }
+// in demo mode only the AI key matters
+const keysMissing = (keys, demo) => Object.entries(keys).some(([k, s]) => s.needed && !s.set && (!demo || k === "anthropic" || k === "openai"));
 function openKeys() { $("keyMsg").textContent = ""; send({ action: "get_keys" }); if (!$("keysDlg").open) $("keysDlg").showModal(); }
 
 function showPrep(p) {
@@ -244,7 +253,7 @@ function connect() {
         else if ($("ctx").value) send({ action: "context", text: $("ctx").value });
         showPrep(m.prep);
         if (!m.prep.files.length) { let saved = []; try { saved = JSON.parse(localStorage.getItem("copilot_prep") || "[]"); } catch {} if (saved.length) send({ action: "prep", files: saved }); }
-        if (!keysPrompted && (!m.keys.anthropic.set || (!m.keys.deepgram.set && m.mode !== "demo"))) { keysPrompted = true; openKeys(); }
+        if (!keysPrompted && keysMissing(m.keys, m.mode === "demo")) { keysPrompted = true; openKeys(); }
         break;
       case "status": setStatus(m); break;
       case "prep": showPrep(m); break;
@@ -269,8 +278,8 @@ function connect() {
       case "source": $("m_" + m.key)?.classList.toggle("err", m.state !== "live"); break;
       case "keys": showKeys(m.keys); if (m.error) { $("keyMsg").textContent = m.error; $("keyMsg").className = "bad"; } break;
       case "key_test": {
-        const f = r => `<span class="${r.ok ? "ok" : "bad"}">${esc(r.text)}</span>`;
-        $("keyMsg").innerHTML = `Anthropic: ${f(m.anthropic)}<br>Deepgram: ${f(m.deepgram)}`; $("keyMsg").className = ""; break;
+        $("keyMsg").innerHTML = Object.entries(m.results).map(([k, r]) => `${KEY_NAMES[k]}: <span class="${r.ok ? "ok" : "bad"}">${esc(r.text)}</span>`).join("<br>");
+        $("keyMsg").className = ""; break;
       }
       case "cleared": tEl.innerHTML = ""; Object.keys(interims).forEach(k => delete interims[k]); toast("Saved and cleared"); break;
       case "info": toast(m.text); break;
@@ -292,8 +301,8 @@ $("prepRefresh").onclick = e => { e.preventDefault(); send({ action: "prep" }); 
 $("closeKeys").onclick = () => $("keysDlg").close();
 $("testKeys").onclick = () => { $("keyMsg").textContent = "Testing…"; $("keyMsg").className = ""; send({ action: "test_keys" }); };
 $("saveKeys").onclick = () => {
-  const keys = { anthropic: $("in_anthropic").value.trim(), deepgram: $("in_deepgram").value.trim() };
-  $("in_anthropic").value = $("in_deepgram").value = "";
+  const keys = {};
+  $("keyRows").querySelectorAll("input").forEach(i => { keys[i.id.slice(3)] = i.value.trim(); i.value = ""; });
   $("keyMsg").textContent = "Saving and testing…"; $("keyMsg").className = "";
   send({ action: "save_keys", keys });
 };

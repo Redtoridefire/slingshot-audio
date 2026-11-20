@@ -23,6 +23,7 @@ import re
 import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 import uuid
@@ -64,8 +65,20 @@ def _env_float(name: str, default: float) -> float:
 DG_URL = os.getenv("DEEPGRAM_URL", "wss://api.deepgram.com/v1/listen")
 DG_API = os.getenv("DEEPGRAM_API_URL", "https://api.deepgram.com")
 DG_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
-ANSWER_MODEL = os.getenv("ANSWER_MODEL", "claude-sonnet-5-5")
-FAST_MODEL = os.getenv("FAST_MODEL", "claude-haiku-5-5")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()   # anthropic | openai
+STT_PROVIDER = os.getenv("STT_PROVIDER", "deepgram").strip().lower()    # deepgram | assemblyai | whisper
+if LLM_PROVIDER == "openai":
+    ANSWER_MODEL = os.getenv("OPENAI_ANSWER_MODEL", "gpt-5")
+    FAST_MODEL = os.getenv("OPENAI_FAST_MODEL", "gpt-5-mini")
+else:
+    ANSWER_MODEL = os.getenv("ANSWER_MODEL", "claude-sonnet-5-5")
+    FAST_MODEL = os.getenv("FAST_MODEL", "claude-haiku-5-5")
+OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
+AAI_URL = os.getenv("ASSEMBLYAI_URL", "wss://streaming.assemblyai.com/v3/ws")
+AAI_API = os.getenv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en") or None
+WHISPER_VAD_RMS = _env_float("WHISPER_VAD_RMS", 0.01)   # loudness that counts as speech for local Whisper
 ANSWER_EFFORT = os.getenv("ANSWER_EFFORT", "low")          # low = fastest first token; medium/high = more careful
 ANSWER_THINKING = os.getenv("ANSWER_THINKING", "adaptive")  # "off" skips thinking entirely (where the model allows it)
 FALLBACKS = os.getenv("CLAUDE_FALLBACKS", "1") != "0"       # server-side retry on another model if one declines
@@ -79,6 +92,9 @@ ECHO_WINDOW = _env_float("ECHO_WINDOW_SEC", 2.0)
 ECHO_MATCH = _env_float("ECHO_MATCH", 0.7)
 AUDIO_QUEUE_MAX = _env_int("AUDIO_QUEUE_MAX", 50)         # 100 ms chunks -> 5 s of buffered audio per source
 DG_PRICE_PER_MIN = _env_float("DEEPGRAM_PRICE_PER_MIN", 0.0077)  # check your Deepgram plan; this is an estimate
+AAI_PRICE_PER_MIN = _env_float("ASSEMBLYAI_PRICE_PER_MIN", 0.0025)  # estimate; check your AssemblyAI plan
+LLM_PRICE_IN = _env_float("LLM_PRICE_IN", 0.0)    # USD per million tokens, for models not in PRICES (e.g. OpenAI)
+LLM_PRICE_OUT = _env_float("LLM_PRICE_OUT", 0.0)
 DEMO_SPEED = _env_float("DEMO_SPEED", 1.0)
 POST_CALL_SUMMARY = os.getenv("POST_CALL_SUMMARY", "1") != "0"   # write a recap + action items when you stop
 CONTEXT_FILE = ROOT / "context.md"
@@ -110,7 +126,8 @@ DISABLE_THINKING_MODELS = {"claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5
 FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-fable-5-1"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-KEY_VARS = {"anthropic": "ANTHROPIC_API_KEY", "deepgram": "DEEPGRAM_API_KEY"}
+KEY_VARS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
+            "deepgram": "DEEPGRAM_API_KEY", "assemblyai": "ASSEMBLYAI_API_KEY"}
 
 warnings.filterwarnings("ignore", message=".*discontinuity.*")  # soundcard noise
 
@@ -199,7 +216,7 @@ class State:
         self.device_names: dict[str, str] = {}
         # cost
         self.usage: dict[str, dict[str, int]] = {}
-        self.dg_seconds = 0.0
+        self.stt_seconds = 0.0
         self.hotkey_proc = None
         self.recap_task: asyncio.Task | None = None
 
@@ -269,13 +286,14 @@ def record_usage(model: str, usage) -> None:
 def cost_msg() -> dict:
     claude_usd = 0.0
     for model, u in S.usage.items():
-        p_in, p_out, p_read = PRICES.get(model, PRICES["claude-sonnet-5-5"])
+        p_in, p_out, p_read = PRICES.get(model, (LLM_PRICE_IN, LLM_PRICE_OUT, LLM_PRICE_IN / 10))
         claude_usd += (u["in"] * p_in + u["out"] * p_out + u["cache_read"] * p_read + u["cache_write"] * p_in * 1.25) / 1e6
-    dg_usd = S.dg_seconds / 60 * DG_PRICE_PER_MIN
+    per_min = {"deepgram": DG_PRICE_PER_MIN, "assemblyai": AAI_PRICE_PER_MIN}.get(STT_PROVIDER, 0.0)
+    dg_usd = 0.0 if S.demo else S.stt_seconds / 60 * per_min
     tokens = {k: sum(u[k] for u in S.usage.values()) for k in ("in", "out", "cache_read", "cache_write")}
     return {
-        "type": "cost", "total": round(claude_usd + dg_usd, 4), "claude": round(claude_usd, 4),
-        "deepgram": round(dg_usd, 4), "audio_min": round(S.dg_seconds / 60, 2), "tokens": tokens,
+        "type": "cost", "total": round(claude_usd + dg_usd, 4), "llm": round(claude_usd, 4),
+        "stt": round(dg_usd, 4), "llm_provider": LLM_PROVIDER, "stt_provider": STT_PROVIDER, "audio_min": round(S.stt_seconds / 60, 2), "tokens": tokens,
     }
 
 
@@ -449,8 +467,8 @@ def save_transcript() -> Path | None:
         for s in S.segments
     )
     c = cost_msg()
-    footer = (f"\n\n---\n_Estimated cost: ${c['total']:.3f} (Claude ${c['claude']:.3f}, "
-              f"Deepgram ${c['deepgram']:.3f} for {c['audio_min']} min of audio)_\n")
+    footer = (f"\n\n---\n_Estimated cost: ${c['total']:.3f} ({LLM_PROVIDER} ${c['llm']:.3f}, "
+              f"{STT_PROVIDER} ${c['stt']:.3f} for {c['audio_min']} min of audio)_\n")
     path.write_text(f"# Conversation {time.strftime('%Y-%m-%d %H:%M', time.localtime(start))}\n\n{body}\n{footer}",
                     encoding="utf-8")
     S.dirty = False
@@ -477,16 +495,125 @@ def text_of(resp) -> str:
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
 
 
-async def quick(model: str, system, prompt, max_tokens: int):
+def _blocks(x) -> list[dict]:
+    return x if isinstance(x, list) else [{"type": "text", "text": x}]
+
+
+def _flat(x) -> str:
+    return x if isinstance(x, str) else "\n\n".join(b["text"] for b in x)
+
+
+class AnthropicLLM:
+    """Claude via the Anthropic SDK. `system` / `content` are text or content blocks (with cache_control)."""
+
+    name = "Claude"
+
+    async def complete(self, model, system, content, max_tokens, effort="low", thinking_off=True) -> tuple[str, str]:
+        r = await claude().messages.create(
+            model=model, max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": _blocks(content)}],
+            **model_opts(model, effort, thinking_off),
+        )
+        record_usage(getattr(r, "model", None) or model, getattr(r, "usage", None))
+        return text_of(r), getattr(r, "stop_reason", None)
+
+    async def stream(self, model, system, content, max_tokens, effort, thinking_off, result: dict):
+        kw = model_opts(model, effort, thinking_off)
+        api = claude().messages
+        if FALLBACKS and model in FALLBACK_MODELS:
+            api = claude().beta.messages
+            kw.update(betas=[FALLBACK_BETA], fallbacks="default")
+        async with api.stream(model=model, max_tokens=max_tokens, system=system,
+                              messages=[{"role": "user", "content": _blocks(content)}], **kw) as st:
+            async for chunk in st.text_stream:
+                yield chunk
+            final = await st.get_final_message()
+        record_usage(getattr(final, "model", None) or model, getattr(final, "usage", None))
+        result["stop_reason"] = getattr(final, "stop_reason", None)
+
+    async def check(self, models) -> None:
+        for m in models:
+            await claude().models.retrieve(m)
+
+
+_openai = None
+
+
+def openai_client():
+    global _openai
+    if _openai is None:
+        from openai import AsyncOpenAI
+
+        _openai = AsyncOpenAI(api_key=get_key("openai") or None)
+    return _openai
+
+
+class OpenAILLM:
+    """OpenAI chat completions. Content blocks are flattened to text (OpenAI caches long prefixes by itself)."""
+
+    name = "OpenAI"
+
+    @staticmethod
+    def _reasoning(model: str) -> bool:
+        return bool(re.match(r"^(o\d|gpt-5)", model))
+
+    def _kw(self, model, max_tokens) -> dict:
+        kw = {"max_completion_tokens": max_tokens}
+        if self._reasoning(model):  # reasoning tokens count against the limit, so leave room
+            kw["max_completion_tokens"] = max(max_tokens, 2000)
+            if OPENAI_REASONING_EFFORT:
+                kw["reasoning_effort"] = OPENAI_REASONING_EFFORT
+        return kw
+
+    @staticmethod
+    def _messages(system, content):
+        return [{"role": "system", "content": _flat(system)}, {"role": "user", "content": _flat(content)}]
+
+    @staticmethod
+    def _usage(model, u) -> None:
+        if u is None:
+            return
+        cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+        record_usage(model, types.SimpleNamespace(input_tokens=(u.prompt_tokens or 0) - cached, output_tokens=u.completion_tokens,
+                                                  cache_read_input_tokens=cached, cache_creation_input_tokens=0))
+
+    @staticmethod
+    def _stop(reason):
+        return "refusal" if reason == "content_filter" else reason
+
+    async def complete(self, model, system, content, max_tokens, effort="low", thinking_off=True) -> tuple[str, str]:
+        r = await openai_client().chat.completions.create(model=model, messages=self._messages(system, content),
+                                                          **self._kw(model, max_tokens))
+        self._usage(model, getattr(r, "usage", None))
+        choice = r.choices[0]
+        return (choice.message.content or "").strip(), self._stop(choice.finish_reason)
+
+    async def stream(self, model, system, content, max_tokens, effort, thinking_off, result: dict):
+        st = await openai_client().chat.completions.create(
+            model=model, messages=self._messages(system, content), stream=True,
+            stream_options={"include_usage": True}, **self._kw(model, max_tokens))
+        async for ch in st:
+            if getattr(ch, "usage", None):
+                self._usage(model, ch.usage)
+            for c in ch.choices or []:
+                if c.delta and c.delta.content:
+                    yield c.delta.content
+                if c.finish_reason:
+                    result["stop_reason"] = self._stop(c.finish_reason)
+
+    async def check(self, models) -> None:
+        for m in models:
+            await openai_client().models.retrieve(m)
+
+
+def llm():
+    return OpenAILLM() if LLM_PROVIDER == "openai" else AnthropicLLM()
+
+
+async def quick(model: str, system, prompt, max_tokens: int) -> str:
     """Short, fast, non-streamed call with thinking off (used for detection, points, summaries)."""
-    content = prompt if isinstance(prompt, list) else [{"type": "text", "text": prompt}]
-    r = await claude().messages.create(
-        model=model, max_tokens=max_tokens, system=system,
-        messages=[{"role": "user", "content": content}],
-        **model_opts(model, "low", thinking_off=True),
-    )
-    record_usage(getattr(r, "model", model) or model, getattr(r, "usage", None))
-    return r
+    text, _ = await llm().complete(model, system, prompt, max_tokens)
+    return text
 
 
 # ---------------------------------------------------------------- Claude: answers
@@ -501,33 +628,21 @@ async def run_answer(trigger: str, question: str | None, t_ref: float) -> None:
     await broadcast({"type": "answer_start", "id": aid, "trigger": trigger, "question": question, "ts": time.time()})
     ask = (f"My question: {question}" if question
            else "Help me respond to the most recent question or point directed at me.")
-    kw = model_opts(ANSWER_MODEL, ANSWER_EFFORT, ANSWER_THINKING == "off")
-    api = claude().messages
-    if FALLBACKS and ANSWER_MODEL in FALLBACK_MODELS:
-        api = claude().beta.messages
-        kw.update(betas=[FALLBACK_BETA], fallbacks="default")
-    got_text = False
+    got_text, result = False, {}
     try:
-        async with api.stream(
-            model=ANSWER_MODEL,
-            max_tokens=4000,
-            system=system_blocks(SYSTEM_ANSWER),
-            messages=[{"role": "user", "content": transcript_blocks() + [{"type": "text", "text": ask}]}],
-            **kw,
-        ) as stream:
-            async for chunk in stream.text_stream:
-                if not got_text:
-                    got_text = True
-                    ms = int((time.monotonic() - t_ref) * 1000)
-                    log.info("answer %s (%s) first token after %d ms", aid, trigger, ms)
-                    await broadcast({"type": "answer_meta", "id": aid, "latency_ms": ms,
-                                     "from": "speech" if trigger == "auto" else "request"})
-                await broadcast({"type": "answer_delta", "id": aid, "text": chunk})
-            final = await stream.get_final_message()
-        record_usage(getattr(final, "model", None) or ANSWER_MODEL, getattr(final, "usage", None))
-        reason = getattr(final, "stop_reason", None)
+        async for chunk in llm().stream(ANSWER_MODEL, system_blocks(SYSTEM_ANSWER),
+                                        transcript_blocks() + [{"type": "text", "text": ask}],
+                                        4000, ANSWER_EFFORT, ANSWER_THINKING == "off", result):
+            if not got_text:
+                got_text = True
+                ms = int((time.monotonic() - t_ref) * 1000)
+                log.info("answer %s (%s) first token after %d ms", aid, trigger, ms)
+                await broadcast({"type": "answer_meta", "id": aid, "latency_ms": ms,
+                                 "from": "speech" if trigger == "auto" else "request"})
+            await broadcast({"type": "answer_delta", "id": aid, "text": chunk})
+        reason = result.get("stop_reason")
         if reason == "refusal":
-            await broadcast({"type": "answer_delta", "id": aid, "text": "\n(Claude declined to answer this one.)"})
+            await broadcast({"type": "answer_delta", "id": aid, "text": f"\n({llm().name} declined to answer this one.)"})
         elif not got_text:
             await broadcast({"type": "answer_delta", "id": aid, "text": f"(No answer text — stop reason: {reason})"})
         await broadcast({"type": "answer_end", "id": aid})
@@ -537,7 +652,7 @@ async def run_answer(trigger: str, question: str | None, t_ref: float) -> None:
         raise
     except Exception as e:  # noqa: BLE001
         await broadcast({"type": "answer_end", "id": aid})
-        await notify_error(f"Claude error: {e}", e)
+        await notify_error(f"{llm().name} error: {e}", e)
 
 
 # ---------------------------------------------------------------- Claude: auto-detect questions
@@ -561,8 +676,7 @@ async def auto_check(seg: dict) -> None:
         "Reply YES or NO."
     )
     try:
-        r = await quick(FAST_MODEL, SYSTEM_DETECT, prompt, max_tokens=16)
-        verdict = text_of(r).upper()
+        verdict = (await quick(FAST_MODEL, SYSTEM_DETECT, prompt, max_tokens=16)).upper()
     except Exception as e:  # noqa: BLE001
         await notify_error(f"Question detection error: {e}", e)
         return
@@ -584,8 +698,8 @@ async def points_loop() -> None:
 
 async def refresh_points() -> None:
     try:
-        r = await quick(FAST_MODEL, system_blocks(SYSTEM_POINTS), transcript_blocks(), max_tokens=400)
-        await broadcast({"type": "points", "text": text_of(r), "ts": time.time()})
+        text = await quick(FAST_MODEL, system_blocks(SYSTEM_POINTS), transcript_blocks(), max_tokens=400)
+        await broadcast({"type": "points", "text": text, "ts": time.time()})
         await broadcast(cost_msg())
     except Exception as e:  # noqa: BLE001
         await notify_error(f"Talking points error: {e}", e)
@@ -616,8 +730,7 @@ async def summarize(start: int, cut: int) -> None:
               f"<new_transcript>\n{chunk}\n</new_transcript>\n\n"
               "Write the updated summary covering both.")
     try:
-        r = await quick(FAST_MODEL, SYSTEM_SUMMARY, prompt, max_tokens=1200)
-        text = text_of(r)
+        text = await quick(FAST_MODEL, SYSTEM_SUMMARY, prompt, max_tokens=1200)
         if text and S.summary_upto == start:  # transcript wasn't cleared meanwhile
             S.summary, S.summary_upto = text, cut
             log.info("summary updated: covers %d segments (%d chars)", cut, len(text))
@@ -644,15 +757,11 @@ def start_recap(transcript: Path | None) -> None:
 async def write_recap(transcript: Path, text: str, system) -> Path | None:
     await broadcast({"type": "info", "text": "Writing the post-call summary…"})
     try:
-        r = await claude().messages.create(
-            model=ANSWER_MODEL, max_tokens=8000, system=system,
-            messages=[{"role": "user", "content": f"<transcript>\n{text[-400_000:]}\n</transcript>\n\nWrite the recap."}],
-            **model_opts(ANSWER_MODEL, "medium", thinking_off=False),
-        )
-        record_usage(getattr(r, "model", None) or ANSWER_MODEL, getattr(r, "usage", None))
-        recap = text_of(r)
+        recap, reason = await llm().complete(
+            ANSWER_MODEL, system, f"<transcript>\n{text[-400_000:]}\n</transcript>\n\nWrite the recap.",
+            8000, effort="medium", thinking_off=False)
         if not recap:
-            raise RuntimeError(f"empty response (stop reason: {getattr(r, 'stop_reason', None)})")
+            raise RuntimeError(f"empty response (stop reason: {reason})")
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001
@@ -800,22 +909,31 @@ def speaker_of(src: dict, alt: dict) -> str:
 
 
 async def stt_loop(src: dict, queue: asyncio.Queue, stop: asyncio.Event) -> None:
-    """Keep a Deepgram stream open for one audio source; reconnect with backoff on failure."""
+    """Transcribe one audio source with the configured speech-to-text provider until `stop`."""
+    if STT_PROVIDER == "whisper":
+        return await whisper_loop(src, queue, stop)
+    if STT_PROVIDER == "assemblyai":
+        return await ws_stt_loop(src, queue, stop, ASSEMBLYAI)
+    return await ws_stt_loop(src, queue, stop, DEEPGRAM)
+
+
+async def ws_stt_loop(src: dict, queue: asyncio.Queue, stop: asyncio.Event, prov: dict) -> None:
+    """Keep a streaming-STT websocket open for one audio source; reconnect with backoff on failure."""
     delay = RECONNECT_MIN
+    name = prov["name"]
     while not stop.is_set():
         try:
             async with websockets.connect(
-                dg_query(src["diarize"]),
-                additional_headers={"Authorization": f"Token {get_key('deepgram')}"},
+                prov["url"](src), additional_headers=prov["headers"](),
                 max_size=None, ping_interval=20, open_timeout=10,
             ) as ws:
-                log.info("deepgram connected: %s", src["label"])
+                log.info("%s connected: %s", name, src["label"])
                 delay = RECONNECT_MIN
                 await broadcast({"type": "source", "key": src["key"], "state": "live"})
-                sender = asyncio.create_task(_dg_send(ws, queue, stop))
-                receiver = asyncio.create_task(_dg_recv(ws, src))
+                sender = asyncio.create_task(_send_audio(ws, queue, stop, prov["keepalive"], prov["close"]))
+                receiver = asyncio.create_task(prov["recv"](ws, src))
                 done, pending = await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
-                if sender in done and not sender.exception():  # stop requested: let Deepgram flush final results
+                if sender in done and not sender.exception():  # stop requested: let the provider flush final results
                     try:
                         await asyncio.wait_for(asyncio.shield(receiver), 3)
                     except Exception:  # noqa: BLE001
@@ -827,7 +945,7 @@ async def stt_loop(src: dict, queue: asyncio.Queue, stop: asyncio.Event) -> None
                         raise t.exception()
             if stop.is_set():
                 break
-            raise ConnectionError("stream closed by Deepgram")
+            raise ConnectionError(f"stream closed by {name}")
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -835,37 +953,39 @@ async def stt_loop(src: dict, queue: asyncio.Queue, stop: asyncio.Event) -> None
                 break
             status = getattr(getattr(e, "response", None), "status_code", None)
             if status in (401, 403):
-                await notify_error(f"Deepgram rejected the API key (HTTP {status}). Open Settings to fix it.")
+                await notify_error(f"{name} rejected the API key (HTTP {status}). Open Settings to fix it.")
                 await broadcast({"type": "source", "key": src["key"], "state": "error"})
                 return
-            log.warning("deepgram %s: %s; reconnecting in %.1fs", src["label"], e, delay)
+            log.warning("%s %s: %s; reconnecting in %.1fs", name, src["label"], e, delay)
             await broadcast({"type": "source", "key": src["key"], "state": "reconnecting"})
             if delay >= 2:  # don't toast every blip
-                await broadcast({"type": "error", "text": f"Deepgram ({src['label']}): {e} — reconnecting"})
+                await broadcast({"type": "error", "text": f"{name} ({src['label']}): {e} — reconnecting"})
             try:
                 await asyncio.wait_for(stop.wait(), delay)
                 break
             except asyncio.TimeoutError:
                 pass
             delay = min(delay * 2, RECONNECT_MAX)
-    log.info("deepgram stream ended: %s", src["label"])
+    log.info("%s stream ended: %s", name, src["label"])
 
 
-async def _dg_send(ws, queue: asyncio.Queue, stop: asyncio.Event) -> None:
+async def _send_audio(ws, queue: asyncio.Queue, stop: asyncio.Event,
+                      keepalive: str | None = '{"type": "KeepAlive"}', close: str = '{"type": "CloseStream"}') -> None:
     async def send(chunk: bytes) -> None:
         await ws.send(chunk)
-        S.dg_seconds += len(chunk) / (2 * SAMPLE_RATE)
+        S.stt_seconds += len(chunk) / (2 * SAMPLE_RATE)
 
     while not stop.is_set():
         try:
             chunk = await asyncio.wait_for(queue.get(), 1.0)
         except asyncio.TimeoutError:
-            await ws.send(json.dumps({"type": "KeepAlive"}))
+            if keepalive:
+                await ws.send(keepalive)
             continue
         await send(chunk)
     while not queue.empty():  # send what was captured before stop
         await send(queue.get_nowait())
-    await ws.send(json.dumps({"type": "CloseStream"}))
+    await ws.send(close)
 
 
 async def _dg_recv(ws, src: dict) -> None:
@@ -914,6 +1034,130 @@ async def _dg_recv(ws, src: dict) -> None:
             await flush()
 
 
+DEEPGRAM = {
+    "name": "Deepgram", "url": lambda src: dg_query(src["diarize"]),
+    "headers": lambda: {"Authorization": f"Token {get_key('deepgram')}"},
+    "keepalive": json.dumps({"type": "KeepAlive"}), "close": json.dumps({"type": "CloseStream"}), "recv": _dg_recv,
+}
+
+
+# ---------------------------------------------------------------- AssemblyAI streaming (v3)
+def aai_query() -> str:
+    return f"{AAI_URL}?{urlencode({'sample_rate': SAMPLE_RATE, 'encoding': 'pcm_s16le', 'format_turns': 'true'})}"
+
+
+async def _aai_recv(ws, src: dict) -> None:
+    """AssemblyAI sends Turn messages; a finished turn arrives unformatted, then formatted. No speaker labels."""
+    pending: tuple | None = None  # (turn_order, text) of an ended turn still waiting for its formatted version
+
+    async def finish(text: str) -> None:
+        await broadcast({"type": "interim", "source": src["key"], "text": ""})
+        await commit(src["label"], text, src["key"])
+
+    try:
+        async for raw in ws:
+            if isinstance(raw, bytes):
+                continue
+            msg = json.loads(raw)
+            kind = msg.get("type")
+            if kind == "Turn":
+                text, order = (msg.get("transcript") or "").strip(), msg.get("turn_order")
+                if pending and pending[0] != order:
+                    text_p, pending = pending[1], None
+                    await finish(text_p)
+                if msg.get("end_of_turn"):
+                    if msg.get("turn_is_formatted"):
+                        pending = None
+                        if text:
+                            await finish(text)
+                    elif text:
+                        pending = (order, text)
+                elif text:
+                    await broadcast({"type": "interim", "source": src["key"], "text": text, "speaker": src["label"]})
+            elif kind == "Termination":
+                break
+            elif kind == "Error" or "error" in msg:
+                log.warning("AssemblyAI %s error message: %s", src["label"], msg)
+    finally:
+        if pending:
+            await finish(pending[1])
+
+
+ASSEMBLYAI = {
+    "name": "AssemblyAI", "url": lambda src: aai_query(),
+    "headers": lambda: {"Authorization": get_key("assemblyai")},
+    "keepalive": None, "close": json.dumps({"type": "Terminate"}), "recv": _aai_recv,
+}
+
+
+# ---------------------------------------------------------------- local Whisper (faster-whisper, no cloud STT)
+_whisper = None
+_whisper_lock = threading.Lock()
+
+
+def whisper_transcribe(audio: np.ndarray) -> str:
+    """Blocking; runs in a worker thread. The model is loaded once (downloaded on first use)."""
+    global _whisper
+    with _whisper_lock:
+        if _whisper is None:
+            from faster_whisper import WhisperModel
+
+            log.info("loading Whisper model %s", WHISPER_MODEL)
+            _whisper = WhisperModel(WHISPER_MODEL, device="auto", compute_type="int8")
+        segments, _ = _whisper.transcribe(audio, language=WHISPER_LANGUAGE, beam_size=1,
+                                          vad_filter=False, condition_on_previous_text=False)
+        return " ".join(seg.text.strip() for seg in segments).strip()
+
+
+async def whisper_loop(src: dict, queue: asyncio.Queue, stop: asyncio.Event) -> None:
+    """Simple loudness-based endpointing: an utterance ends after 0.7 s of quiet (or 15 s of speech),
+    then it is transcribed locally in a background worker so audio keeps flowing. No speaker labels."""
+    utterances: asyncio.Queue = asyncio.Queue()
+
+    async def worker() -> None:
+        while (audio := await utterances.get()) is not None:
+            try:
+                text = await asyncio.to_thread(whisper_transcribe, audio)
+            except Exception as e:  # noqa: BLE001
+                await notify_error(f"Whisper failed ({src['label']}): {e}", e)
+                continue
+            await broadcast({"type": "interim", "source": src["key"], "text": ""})
+            if text:
+                await commit(src["label"], text, src["key"])
+
+    w = asyncio.create_task(worker())
+    await broadcast({"type": "source", "key": src["key"], "state": "live"})
+    speech: list[np.ndarray] = []
+    loud_chunks = quiet_ms = 0
+    while not (stop.is_set() and queue.empty()):
+        try:
+            chunk = await asyncio.wait_for(queue.get(), 0.5)
+        except asyncio.TimeoutError:
+            continue
+        S.stt_seconds += len(chunk) / (2 * SAMPLE_RATE)
+        x = np.frombuffer(chunk, dtype="<i2").astype(np.float32) / 32768.0
+        loud = float(np.sqrt(np.mean(np.square(x)))) > WHISPER_VAD_RMS
+        if loud:
+            if not speech:
+                await broadcast({"type": "interim", "source": src["key"], "text": "…", "speaker": src["label"]})
+            loud_chunks += 1
+            quiet_ms = 0
+        elif speech:
+            quiet_ms += 100
+        if loud or speech:
+            speech.append(x)
+        if speech and (quiet_ms >= 700 or len(speech) >= 150):
+            if loud_chunks >= 3:  # at least 0.3 s of speech; avoids Whisper "hearing" words in noise
+                utterances.put_nowait(np.concatenate(speech))
+            else:
+                await broadcast({"type": "interim", "source": src["key"], "text": ""})
+            speech, loud_chunks, quiet_ms = [], 0, 0
+    if speech and loud_chunks >= 3:
+        utterances.put_nowait(np.concatenate(speech))
+    utterances.put_nowait(None)
+    await w
+
+
 # ---------------------------------------------------------------- demo feed (no audio / Deepgram needed)
 DEMO_SCRIPT = [
     ("Them 1", "system", "Thanks for making time. Quick background: we're a two hundred person fintech, mostly on AWS."),
@@ -958,8 +1202,8 @@ async def start_listening() -> None:
     if S.demo:
         S.tasks.append(asyncio.create_task(demo_feed(S.stop_async)))
     else:
-        if not get_key("deepgram"):
-            await notify_error("DEEPGRAM_API_KEY is not set. Open Settings (⚙) to add it.")
+        if STT_PROVIDER != "whisper" and not get_key(STT_PROVIDER):
+            await notify_error(f"{KEY_VARS[STT_PROVIDER]} is not set. Open Settings (⚙) to add it.")
             return
         try:
             mic, system = await asyncio.to_thread(resolve_devices)
@@ -1066,11 +1310,19 @@ async def hotkey_supervisor() -> None:
 
 
 # ---------------------------------------------------------------- keys / settings
+def needed_keys() -> list[str]:
+    keys = ["openai" if LLM_PROVIDER == "openai" else "anthropic"]
+    if STT_PROVIDER in ("deepgram", "assemblyai"):
+        keys.append(STT_PROVIDER)
+    return keys
+
+
 def key_status() -> dict:
     out = {}
+    need = needed_keys()
     for which in KEY_VARS:
         v = get_key(which)
-        out[which] = {"set": bool(v), "hint": f"…{v[-4:]}" if len(v) > 8 else ""}
+        out[which] = {"set": bool(v), "hint": f"…{v[-4:]}" if len(v) > 8 else "", "needed": which in need}
     return out
 
 
@@ -1096,7 +1348,7 @@ def write_env(updates: dict[str, str], path: Path | None = None) -> None:
 
 
 async def save_keys(values: dict) -> str | None:
-    global _client
+    global _client, _openai
     updates = {}
     for which, var in KEY_VARS.items():
         v = (values.get(which) or "").strip()
@@ -1108,35 +1360,43 @@ async def save_keys(values: dict) -> str | None:
     if not updates:
         return "Nothing to save."
     write_env(updates)
-    _client = None  # rebuild the Anthropic client with the new key
+    _client = _openai = None  # rebuild the clients with the new keys
     log.info("keys updated: %s", ", ".join(sorted(updates)))  # names only, never values
     return None
 
 
-async def test_anthropic() -> dict:
-    if not get_key("anthropic"):
+async def test_llm() -> dict:
+    """Checks the key and that both configured models exist (works for Anthropic and OpenAI)."""
+    if not get_key("openai" if LLM_PROVIDER == "openai" else "anthropic"):
         return {"ok": False, "text": "not set"}
-    import anthropic
-
     try:
-        for m in dict.fromkeys([ANSWER_MODEL, FAST_MODEL]):
-            await claude().models.retrieve(m)
+        await llm().check(list(dict.fromkeys([ANSWER_MODEL, FAST_MODEL])))
         return {"ok": True, "text": f"OK — {ANSWER_MODEL} and {FAST_MODEL} available"}
-    except anthropic.AuthenticationError:
-        return {"ok": False, "text": "key rejected"}
-    except anthropic.NotFoundError as e:
-        return {"ok": False, "text": f"model not available to this key: {e}"}
     except Exception as e:  # noqa: BLE001
+        status = getattr(e, "status_code", None)
+        if status in (401, 403):
+            return {"ok": False, "text": "key rejected"}
+        if status == 404:
+            return {"ok": False, "text": f"model not available to this key: {e}"}
         return {"ok": False, "text": f"{type(e).__name__}: {e}"}
 
 
-async def test_deepgram() -> dict:
-    key = get_key("deepgram")
+async def test_stt() -> dict:
+    if STT_PROVIDER == "whisper":
+        import importlib.util
+
+        ok = importlib.util.find_spec("faster_whisper") is not None
+        return {"ok": ok, "text": f"local Whisper ({WHISPER_MODEL}), no key needed" if ok else "faster-whisper not installed"}
+    key = get_key(STT_PROVIDER)
     if not key:
         return {"ok": False, "text": "not set"}
+    if STT_PROVIDER == "assemblyai":
+        url, auth = f"{AAI_API}/v2/transcript?limit=1", key
+    else:
+        url, auth = f"{DG_API}/v1/projects", f"Token {key}"
 
     def call() -> dict:
-        req = urllib.request.Request(f"{DG_API}/v1/projects", headers={"Authorization": f"Token {key}"})
+        req = urllib.request.Request(url, headers={"Authorization": auth})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
                 return {"ok": r.status == 200, "text": "OK"}
@@ -1146,6 +1406,14 @@ async def test_deepgram() -> dict:
             return {"ok": False, "text": f"{type(e).__name__}: {e}"}
 
     return await asyncio.to_thread(call)
+
+
+async def key_test_msg() -> dict:
+    llm_key = "openai" if LLM_PROVIDER == "openai" else "anthropic"
+    results = {llm_key: await test_llm()}
+    if STT_PROVIDER != "whisper":
+        results[STT_PROVIDER] = await test_stt()
+    return {"type": "key_test", "results": results}
 
 
 # ---------------------------------------------------------------- web app
@@ -1250,7 +1518,7 @@ async def handle(msg: dict, ws: WebSocket | None = None) -> None:
         S.points_mark = S.summary_upto = 0
         S.summary = ""
         S.started_at = None
-        S.usage, S.dg_seconds = {}, 0.0
+        S.usage, S.stt_seconds = {}, 0.0
         S.names = {}
         await broadcast({"type": "names", "names": S.names})
         if S.listening:
@@ -1273,14 +1541,14 @@ async def handle(msg: dict, ws: WebSocket | None = None) -> None:
         err = await save_keys(msg.get("keys") or {})
         await reply({"type": "keys", "keys": key_status(), "error": err})
         if not err:
-            await reply({"type": "key_test", "anthropic": await test_anthropic(), "deepgram": await test_deepgram()})
+            await reply(await key_test_msg())
     elif action == "test_keys":
-        await reply({"type": "key_test", "anthropic": await test_anthropic(), "deepgram": await test_deepgram()})
+        await reply(await key_test_msg())
 
 
 # ---------------------------------------------------------------- self-check (`--check`)
 async def self_check() -> int:
-    """Checks keys, models, latency, devices and a live Deepgram stream; writes a report to logs/."""
+    """Checks keys, models, latency, devices and live speech-to-text; writes a report to logs/."""
     lines: list[str] = []
     problems = 0
 
@@ -1291,20 +1559,17 @@ async def self_check() -> int:
     out(f"Live Copilot self-check — {time.strftime('%Y-%m-%d %H:%M:%S')}")
     out(f"OS: {platform.platform()}   Python {sys.version.split()[0]}")
     out()
-    a = await test_anthropic()
-    out(f"[{'ok' if a['ok'] else 'FAIL'}] Anthropic key: {a['text']}")
+    out(f"Providers: {LLM_PROVIDER} ({ANSWER_MODEL} / {FAST_MODEL}), speech-to-text: {STT_PROVIDER}")
+    a = await test_llm()
+    out(f"[{'ok' if a['ok'] else 'FAIL'}] {llm().name} key: {a['text']}")
     problems += not a["ok"]
     if a["ok"]:
         t0 = time.monotonic()
         try:
             first = None
-            async with claude().messages.stream(
-                model=ANSWER_MODEL, max_tokens=200, system="Reply in five words or fewer.",
-                messages=[{"role": "user", "content": "Say hello."}],
-                **model_opts(ANSWER_MODEL, ANSWER_EFFORT, ANSWER_THINKING == "off"),
-            ) as st:
-                async for _ in st.text_stream:
-                    first = first or time.monotonic() - t0
+            async for _ in llm().stream(ANSWER_MODEL, "Reply in five words or fewer.", "Say hello.", 200,
+                                        ANSWER_EFFORT, ANSWER_THINKING == "off", {}):
+                first = first or time.monotonic() - t0
             out(f"[ok] {ANSWER_MODEL} first token: {int((first or 0) * 1000)} ms (effort={ANSWER_EFFORT})")
         except Exception as e:  # noqa: BLE001
             problems += 1
@@ -1313,10 +1578,9 @@ async def self_check() -> int:
                            ("Hey, how's it going? Good weekend?", "NO")):
             try:
                 t0 = time.monotonic()
-                r = await quick(FAST_MODEL, SYSTEM_DETECT,
-                                f'Last line — Them 1: "{line}"\n\nIs the last line a real question the user is expected '
-                                "to answer now? Ignore small talk. Reply YES or NO.", 16)
-                got = text_of(r).upper()[:3]
+                got = (await quick(FAST_MODEL, SYSTEM_DETECT,
+                                   f'Last line — Them 1: "{line}"\n\nIs the last line a real question the user is expected '
+                                   "to answer now? Ignore small talk. Reply YES or NO.", 16)).upper()[:3]
                 good = got.startswith(want)
                 problems += not good
                 out(f"[{'ok' if good else 'FAIL'}] question detection ({FAST_MODEL}): {line!r} -> {got or '(empty)'} "
@@ -1324,8 +1588,8 @@ async def self_check() -> int:
             except Exception as e:  # noqa: BLE001
                 problems += 1
                 out(f"[FAIL] question detection: {e}")
-    d = await test_deepgram()
-    out(f"[{'ok' if d['ok'] else 'FAIL'}] Deepgram key: {d['text']}")
+    d = await test_stt()
+    out(f"[{'ok' if d['ok'] else 'FAIL'}] Speech-to-text ({STT_PROVIDER}): {d['text']}")
     problems += not d["ok"]
     out()
     try:
@@ -1373,26 +1637,43 @@ async def self_check() -> int:
             out(f"[FAIL] {label} capture: {type(e).__name__}: {e}")
     if d["ok"] and pcm_mic:
         out()
-        out("Sending the mic recording to Deepgram…")
+        out(f"Transcribing the mic recording with {STT_PROVIDER}…")
         try:
-            got: list[str] = []
             t0 = time.monotonic()
-            async with websockets.connect(dg_query(False), additional_headers={"Authorization": f"Token {get_key('deepgram')}"},
-                                          open_timeout=10) as ws:
-                for i in range(0, len(pcm_mic), CHUNK * 2):
-                    await ws.send(pcm_mic[i:i + CHUNK * 2])
-                await ws.send(json.dumps({"type": "CloseStream"}))
-                async for raw in ws:
-                    if isinstance(raw, str):
-                        m = json.loads(raw)
-                        if m.get("type") == "Results" and m.get("is_final"):
-                            got.append((m["channel"]["alternatives"][0].get("transcript") or "").strip())
-            text = " ".join(t for t in got if t)
-            out(f"[ok] Deepgram streaming works ({int((time.monotonic() - t0) * 1000)} ms). Heard: {text or '(silence)'}")
+            text = await transcribe_once(pcm_mic)
+            out(f"[ok] Speech-to-text works ({int((time.monotonic() - t0) * 1000)} ms). Heard: {text or '(silence)'}")
         except Exception as e:  # noqa: BLE001
             problems += 1
-            out(f"[FAIL] Deepgram streaming: {e}")
+            out(f"[FAIL] Speech-to-text: {type(e).__name__}: {e}")
     return _finish_check(lines, problems)
+
+
+async def transcribe_once(pcm: bytes) -> str:
+    """Run a recording through the real streaming path (same code as a call) and return the text."""
+    saved = (S.segments, S.auto_answer, broadcast)
+    S.segments, S.auto_answer = [], False
+    errors: list[str] = []
+
+    async def quiet(msg: dict) -> None:
+        if msg.get("type") == "error":
+            errors.append(msg["text"])
+
+    globals()["broadcast"] = quiet
+    try:
+        q: asyncio.Queue = asyncio.Queue()
+        for i in range(0, len(pcm), CHUNK * 2):
+            q.put_nowait(pcm[i:i + CHUNK * 2])
+        stop = asyncio.Event()
+        task = asyncio.create_task(stt_loop({"key": "mic", "label": "You", "diarize": False}, q, stop))
+        await asyncio.sleep(1.5)
+        stop.set()
+        await asyncio.wait_for(task, 60)
+        if errors:
+            raise RuntimeError(errors[0])
+        return " ".join(seg["text"] for seg in S.segments)
+    finally:
+        S.segments, S.auto_answer, g = saved[0], saved[1], saved[2]
+        globals()["broadcast"] = g
 
 
 def _finish_check(lines: list[str], problems: int) -> int:
@@ -1410,6 +1691,10 @@ def ensure_extras(overlay: bool) -> None:
     import subprocess
 
     wanted = []
+    if LLM_PROVIDER == "openai":
+        wanted.append(("openai", "openai>=1.40"))
+    if STT_PROVIDER == "whisper":
+        wanted.append(("faster_whisper", "faster-whisper>=1.0"))
     if overlay:
         wanted.append(("webview", "pywebview>=5"))
     missing = [pkg for mod, pkg in wanted if importlib.util.find_spec(mod) is None]
@@ -1481,12 +1766,12 @@ def main() -> None:
     log.info("starting: %s, Python %s, mode=%s, answer=%s/%s, fast=%s",
              platform.platform(), sys.version.split()[0], status_msg()["mode"], ANSWER_MODEL, ANSWER_EFFORT, FAST_MODEL)
     print("\nLive Copilot")
-    if not get_key("anthropic"):
-        print("  ! ANTHROPIC_API_KEY not set — add it in the panel's Settings (⚙) or in .env")
-    if not get_key("deepgram") and not S.demo:
-        print("  ! DEEPGRAM_API_KEY not set — add it in Settings (⚙), or run with --demo")
+    for which in needed_keys():
+        if not get_key(which) and not (S.demo and which in ("deepgram", "assemblyai")):
+            print(f"  ! {KEY_VARS[which]} not set — add it in the panel's Settings (⚙) or in .env")
     url = f"http://127.0.0.1:{args.port}"
-    print(f"  Panel: {url}\n  Mode: {status_msg()['mode']}   Models: {ANSWER_MODEL} (answers), {FAST_MODEL} (detect/points)")
+    print(f"  Panel: {url}\n  Mode: {status_msg()['mode']}   Models: {ANSWER_MODEL} (answers), {FAST_MODEL} (detect/points)"
+          f"   Speech-to-text: {STT_PROVIDER}")
     print(f"  Log: {rel(LOG_DIR / 'copilot.log')}   Stop with Ctrl+C (the transcript is saved)")
     if not args.no_browser and not args.overlay:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()

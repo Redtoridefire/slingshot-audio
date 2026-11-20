@@ -51,7 +51,7 @@ async def test_deepgram_parsing_labels_and_auto_answer(fake_claude, sent, fake_d
     kw = fake_claude.messages.of("stream")[0]
     assert "Them 2: How long would it take" in content_text(kw)
     assert "Mike Czarnecki" in kw["system"][0]["text"]
-    assert C.S.dg_seconds == pytest.approx(0.5)
+    assert C.S.stt_seconds == pytest.approx(0.5)
 
 
 async def test_reconnects_after_drop_and_keeps_pending_words(fake_claude, sent, fake_dg):
@@ -109,7 +109,7 @@ async def test_send_drains_queue_before_close():
     for i in range(5):
         q.put_nowait(bytes([i]) * 3200)
     stop.set()
-    await C._dg_send(ws, q, stop)
+    await C._send_audio(ws, q, stop)
     assert len([x for x in ws.sent if isinstance(x, bytes)]) == 5
     assert json.loads(ws.sent[-1]) == {"type": "CloseStream"}
 
@@ -199,7 +199,7 @@ async def test_answer_latency_cost_and_fallback_settings(fake_claude, sent):
     assert kw["output_config"] == {"effort": "low"} and "thinking" not in kw
     assert kw["system"][0]["cache_control"] == {"type": "ephemeral"}
     cost = [m for m in sent if m["type"] == "cost"][-1]
-    assert cost["claude"] == pytest.approx((1000 * 2.0 + 100 * 10.0) / 1e6)
+    assert cost["llm"] == pytest.approx((1000 * 2.0 + 100 * 10.0) / 1e6)
 
 
 async def test_refusal_is_shown(fake_claude, sent):
@@ -284,7 +284,7 @@ def test_write_env_keeps_other_lines(tmp_path, monkeypatch):
     assert env.read_text() == "# comment\nANTHROPIC_API_KEY=sk-ant-abc123456789\nPORT=8765\nDEEPGRAM_API_KEY=dg123456789\n"
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg123456789")
     st = C.key_status()
-    assert st["anthropic"] == {"set": True, "hint": "…6789"}
+    assert st["anthropic"] == {"set": True, "hint": "…6789", "needed": True}
     assert "abc" not in json.dumps(st)
 
 
@@ -309,7 +309,7 @@ async def test_recap_written_next_to_transcript(fake_claude, sent):
     recap = C.recap_path(path)
     assert recap.name.endswith(".summary.md") and "send proposal" in recap.read_text()
     kw = [k for k in fake_claude.messages.of("create") if k["system"][0]["text"].startswith(C.SYSTEM_RECAP)][0]
-    assert "Sure, I'll send it Friday." in kw["messages"][0]["content"]
+    assert "Sure, I'll send it Friday." in content_text(kw)
     assert any(m["type"] == "recap" for m in sent)
 
 

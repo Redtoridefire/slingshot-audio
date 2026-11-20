@@ -81,8 +81,8 @@ async def test_keys_saved_but_never_sent_back(server, monkeypatch):
     port = server
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("DEEPGRAM_API_KEY", "")
-    monkeypatch.setattr(C, "test_anthropic", lambda: _ok())
-    monkeypatch.setattr(C, "test_deepgram", lambda: _ok())
+    monkeypatch.setattr(C, "test_llm", lambda: _ok())
+    monkeypatch.setattr(C, "test_stt", lambda: _ok())
     secret = "sk-ant-api03-SECRETVALUE1234"
     msgs = []
     async with websockets.connect(f"ws://127.0.0.1:{port}/ws", origin=f"http://localhost:{port}") as ws:
@@ -93,7 +93,7 @@ async def test_keys_saved_but_never_sent_back(server, monkeypatch):
     assert secret in C.ENV_FILE.read_text()
     assert "SECRETVALUE" not in json.dumps(msgs)
     keys = [m for m in msgs if m["type"] == "keys"][-1]["keys"]
-    assert keys["anthropic"] == {"set": True, "hint": "…1234"}
+    assert keys["anthropic"] == {"set": True, "hint": "…1234", "needed": True}
     assert any(m["type"] == "key_test" for m in msgs)
 
 

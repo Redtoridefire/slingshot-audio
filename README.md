@@ -120,6 +120,17 @@ Opens a small always-on-top window with Start/Stop, **Answer now** and the lates
 | `CLAUDE_FALLBACKS` | 1 | If Claude declines a request, retry it on another model server-side |
 | `LOG_LEVEL` | INFO | `DEBUG` also logs each transcript line |
 
+## Other providers
+
+Claude + Deepgram is the default and the best-tested combination. You can switch either side in `.env` (the app installs the extra package it needs the first time, and Settings ⚙ asks for the right key):
+
+| Setting | Options | Notes |
+|---|---|---|
+| `LLM_PROVIDER` | `anthropic` (default), `openai` | OpenAI uses `OPENAI_API_KEY`, `OPENAI_ANSWER_MODEL` (default `gpt-5`), `OPENAI_FAST_MODEL` (default `gpt-5-mini`). `--check` confirms the model names exist for your key. Set `LLM_PRICE_IN` / `LLM_PRICE_OUT` for the cost estimate. |
+| `STT_PROVIDER` | `deepgram` (default), `assemblyai`, `whisper` | **AssemblyAI** (`ASSEMBLYAI_API_KEY`): streaming, no speaker numbers (everyone on the call is *Them*). **Whisper** runs on your computer with faster-whisper: free and private, no key, but slower (text appears after each sentence, not word by word), no speaker numbers, and the model (~500 MB for `small`) downloads on first use. |
+
+Speaker numbers (*Them 1 / Them 2*) and the live word-by-word text need Deepgram.
+
 ## Troubleshooting
 
 Everything that goes wrong during a call is written to `logs/copilot.log` (rotating, max ~12 MB). The hotkey has its own `logs/hotkey.log`.
@@ -133,7 +144,7 @@ Everything that goes wrong during a call is written to `logs/copilot.log` (rotat
 
 ## How it's built
 
-`copilot.py` is one file: `soundcard` capture threads → one Deepgram websocket per source (interim results, endpointing, diarization, reconnect with backoff, bounded audio queues) → transcript list (+ rolling summary) → Claude via the Anthropic SDK (streamed answers, prompt caching on the stable part of the prompt) → FastAPI websocket → `static/index.html`. The global hotkey runs in a small child process, so a crash there can't take the app down.
+`copilot.py` is one file: `soundcard` capture threads → one speech-to-text stream per source (Deepgram, AssemblyAI or local Whisper) (interim results, endpointing, diarization, reconnect with backoff, bounded audio queues) → transcript list (+ rolling summary) → Claude via the Anthropic SDK, or OpenAI, behind a small interface (`AnthropicLLM` / `OpenAILLM`: streamed answers, prompt caching on the stable part of the prompt) → FastAPI websocket → `static/index.html`. The global hotkey runs in a small child process, so a crash there can't take the app down.
 
 Tests (fake Deepgram server, fake Claude, no keys needed):
 
