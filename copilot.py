@@ -42,8 +42,29 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 
-ROOT = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)  # running as a PyInstaller build
+APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # code + static files
+ROOT = Path.home() / "LiveCopilot" if FROZEN else APP_DIR  # your files: .env, context, transcripts, logs
 ENV_FILE = ROOT / ".env"
+
+
+def _first_run_setup() -> None:
+    """Packaged app: create ~/LiveCopilot with a starter .env and context.md."""
+    import shutil
+
+    (ROOT / "context").mkdir(parents=True, exist_ok=True)
+    for src, dst in ((".env.example", ".env"), ("context.md", "context.md")):
+        if not (ROOT / dst).exists() and (APP_DIR / src).exists():
+            shutil.copy(APP_DIR / src, ROOT / dst)
+            if dst == ".env":
+                try:
+                    os.chmod(ROOT / dst, 0o600)
+                except OSError:
+                    pass
+
+
+if FROZEN:
+    _first_run_setup()
 load_dotenv(ENV_FILE)
 
 
@@ -1278,7 +1299,7 @@ async def hotkey_supervisor() -> None:
     errlog = open(LOG_DIR / "hotkey.log", "ab")  # noqa: SIM115
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(ROOT / "copilot.py"), "--hotkey-child",
+            *([sys.executable] if FROZEN else [sys.executable, str(APP_DIR / "copilot.py")]), "--hotkey-child",
             stdout=asyncio.subprocess.PIPE, stderr=errlog, stdin=asyncio.subprocess.DEVNULL,
         )
     except Exception as e:  # noqa: BLE001
@@ -1461,12 +1482,12 @@ async def only_local(request: Request, call_next):
 
 @app.get("/")
 async def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    return FileResponse(APP_DIR / "static" / "index.html")
 
 
 @app.get("/overlay")
 async def overlay():
-    return FileResponse(ROOT / "static" / "overlay.html")
+    return FileResponse(APP_DIR / "static" / "overlay.html")
 
 
 @app.websocket("/ws")
@@ -1772,7 +1793,7 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.port}"
     print(f"  Panel: {url}\n  Mode: {status_msg()['mode']}   Models: {ANSWER_MODEL} (answers), {FAST_MODEL} (detect/points)"
           f"   Speech-to-text: {STT_PROVIDER}")
-    print(f"  Log: {rel(LOG_DIR / 'copilot.log')}   Stop with Ctrl+C (the transcript is saved)")
+    print(f"  Log: {LOG_DIR / 'copilot.log' if FROZEN else rel(LOG_DIR / 'copilot.log')}   Stop with Ctrl+C (the transcript is saved)")
     if not args.no_browser and not args.overlay:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="warning",

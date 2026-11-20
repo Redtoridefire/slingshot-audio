@@ -142,6 +142,17 @@ Everything that goes wrong during a call is written to `logs/copilot.log` (rotat
 - **Too many auto-answers**: untick *Auto-answer questions* and use the hotkey, or raise `AUTO_COOLDOWN_SEC`.
 - **Hotkey does nothing on Mac**: give Terminal Accessibility and Input Monitoring permission, then restart.
 
+## Standalone build (optional)
+
+To get a folder you can copy to another computer without installing Python there, build it on that OS:
+
+```bash
+pip install pyinstaller
+python packaging/build.py      # -> dist/LiveCopilot/LiveCopilot (LiveCopilot.exe on Windows)
+```
+
+The built app keeps your files (`.env`, `context.md`, `context/`, `transcripts/`, `logs/`) in a `LiveCopilot` folder in your home directory, created on first run. It's a terminal app; on a Mac run it from Terminal so it uses Terminal's Microphone permission. It isn't code-signed, so macOS / Windows will warn the first time. Optional packages installed when you build (pywebview, openai, faster-whisper) are included, and faster-whisper makes the build much bigger (~430 MB vs ~100 MB). For your own machine, the launchers above are simpler.
+
 ## How it's built
 
 `copilot.py` is one file: `soundcard` capture threads → one speech-to-text stream per source (Deepgram, AssemblyAI or local Whisper) (interim results, endpointing, diarization, reconnect with backoff, bounded audio queues) → transcript list (+ rolling summary) → Claude via the Anthropic SDK, or OpenAI, behind a small interface (`AnthropicLLM` / `OpenAILLM`: streamed answers, prompt caching on the stable part of the prompt) → FastAPI websocket → `static/index.html`. The global hotkey runs in a small child process, so a crash there can't take the app down.

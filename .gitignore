@@ -9,3 +9,5 @@ tests/*.png
 tests/_shot_transcripts/
 context/*
 !context/example-prospect.md
+dist/
+build/
