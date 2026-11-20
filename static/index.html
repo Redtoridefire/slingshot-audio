@@ -38,6 +38,7 @@
   .scroll { overflow-y: auto; padding: 4px 14px 14px; flex: 1; }
   .seg { margin: 0 0 8px; }
   .seg .who { font-weight: 600; margin-right: 6px; }
+  .seg .who[data-label] { cursor: pointer; } .seg .who[data-label]:hover { text-decoration: underline dotted; }
   .seg .t { color: var(--muted); font-size: 11px; margin-right: 6px; }
   .you .who { color: var(--you); } .them .who { color: var(--them); }
   .interim { color: var(--muted); font-style: italic; }
@@ -139,7 +140,8 @@ const $ = id => document.getElementById(id);
 const tEl = $("transcript"), aEl = $("answers"), pEl = $("points");
 const interims = {};          // source -> element
 const answers = {};           // id -> {body, card, raw}
-let ws, listening = false, ctxTimer, keysPrompted = false;
+let ws, listening = false, ctxTimer, keysPrompted = false, names = {};
+const shown = label => names[label] || label;
 
 function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 function md(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/^\s*[-*] /gm, "• "); }
@@ -154,7 +156,7 @@ function addSegment(s) {
   const div = document.createElement("div");
   div.className = "seg " + (s.source === "mic" && !s.speaker.startsWith("Speaker") ? "you" : "them");
   if (s.id) div.dataset.id = s.id;
-  div.innerHTML = `<span class="t">${hhmm(s.ts)}</span><span class="who">${esc(s.speaker)}</span>${esc(s.text)}`;
+  div.innerHTML = `<span class="t">${hhmm(s.ts)}</span><span class="who" data-label="${esc(s.speaker)}" title="Click to rename ${esc(s.speaker)}">${esc(shown(s.speaker))}</span>${esc(s.text)}`;
   const firstInterim = Object.values(interims).find(e => e.isConnected);
   tEl.insertBefore(div, firstInterim || null);
   if (stick) tEl.scrollTop = tEl.scrollHeight;
@@ -165,7 +167,7 @@ function setInterim(source, text, speaker) {
   if (!text) { if (el) el.remove(); delete interims[source]; return; }
   if (!el) { el = interims[source] = document.createElement("div"); el.className = "seg interim " + (source === "mic" ? "you" : "them"); tEl.appendChild(el); }
   const stick = nearBottom(tEl);
-  el.innerHTML = `<span class="who">${esc(speaker || (source === "mic" ? "You" : "Them"))}</span>${esc(text)}`;
+  el.innerHTML = `<span class="who">${esc(shown(speaker || (source === "mic" ? "You" : "Them")))}</span>${esc(text)}`;
   if (stick) tEl.scrollTop = tEl.scrollHeight;
 }
 
@@ -219,13 +221,24 @@ function showPrep(p) {
   });
 }
 
+function setNames(n) {
+  names = n || {};
+  tEl.querySelectorAll(".who[data-label]").forEach(w => w.textContent = shown(w.dataset.label));
+}
+tEl.addEventListener("click", e => {
+  const w = e.target.closest(".who[data-label]"); if (!w) return;
+  const label = w.dataset.label;
+  const name = prompt(`Name for ${label} (e.g. "Sarah, CFO"). Leave empty to go back to "${label}".`, names[label] || "");
+  if (name !== null) send({ action: "rename", label, name: name.trim() });
+});
+
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     switch (m.type) {
       case "init":
-        tEl.querySelectorAll(".seg").forEach(e => e.remove());
+        tEl.querySelectorAll(".seg").forEach(e => e.remove()); names = m.names || {};
         m.segments.forEach(addSegment); setStatus(m); setCost(m.cost); showKeys(m.keys);
         if (m.context && !$("ctx").value) $("ctx").value = m.context;
         else if ($("ctx").value) send({ action: "context", text: $("ctx").value });
@@ -235,6 +248,7 @@ function connect() {
         break;
       case "status": setStatus(m); break;
       case "prep": showPrep(m); break;
+      case "names": setNames(m.names); break;
       case "interim": setInterim(m.source, m.text, m.speaker); break;
       case "final": addSegment(m); break;
       case "retract": tEl.querySelector(`[data-id="${m.id}"]`)?.remove(); break;

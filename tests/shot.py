@@ -34,6 +34,11 @@ async def main():
         await pg.click("#closeKeys")
         await pg.click("#startBtn")
         await asyncio.sleep(9)
+        pg.on("dialog", lambda d: asyncio.ensure_future(d.accept("Sarah, CFO")))
+        await pg.click(".seg .who[data-label='Them 1']")
+        await asyncio.sleep(0.3)
+        assert "Sarah, CFO" in await pg.inner_text("#transcript"), "rename should show"
+        await pg.click("details summary")
         await pg.fill("#askInput", "What should I charge for this?")
         await pg.press("#askInput", "Enter")
         await asyncio.sleep(1)

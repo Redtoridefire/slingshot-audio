@@ -173,6 +173,7 @@ class State:
         self.echo_filter = os.getenv("ECHO_FILTER", "0") == "1"
         self.meeting_context = ""
         self.prep_files: list[str] = []
+        self.names: dict[str, str] = {}  # "Them 1" -> "Sarah, CFO"
         self.mic_only = False
         self.demo = False
         self.port = _env_int("PORT", 8765)
@@ -279,8 +280,27 @@ def cost_msg() -> dict:
 
 
 # ---------------------------------------------------------------- transcript helpers
+def display(label: str) -> str:
+    return S.names.get(label, label)
+
+
 def fmt_line(s: dict) -> str:
-    return f"[{time.strftime('%H:%M:%S', time.localtime(s['ts']))}] {s['speaker']}: {s['text']}"
+    return f"[{time.strftime('%H:%M:%S', time.localtime(s['ts']))}] {display(s['speaker'])}: {s['text']}"
+
+
+SPEAKER_LABEL = re.compile(r"^(You|Them|Speaker)( \d{1,2})?$")
+
+
+def rename_speaker(label: str, name: str) -> bool:
+    label, name = str(label).strip(), " ".join(str(name).split())[:60]
+    if not SPEAKER_LABEL.match(label):
+        return False
+    if name and name != label:
+        S.names[label] = name
+    else:
+        S.names.pop(label, None)
+    log.info("speaker %s renamed to %r", label, name or label)
+    return True
 
 
 def transcript_text(max_chars: int = 3000) -> str:
@@ -358,6 +378,9 @@ def background_context() -> str:
         if len(doc) > PREP_MAX_CHARS:
             doc = doc[:PREP_MAX_CHARS] + "\n(…truncated…)"
         parts.append(f'<prep_doc name="{name}">\n{doc}\n</prep_doc>')
+    if S.names:
+        who = "\n".join(f"{label} is {name}" for label, name in sorted(S.names.items()))
+        parts.append(f"<speakers>\nThe transcript uses these names (earlier summaries may use the labels):\n{who}\n</speakers>")
     if S.meeting_context.strip():
         parts.append(f"<this_conversation>\n{S.meeting_context.strip()}\n</this_conversation>")
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
@@ -422,7 +445,7 @@ def save_transcript() -> Path | None:
     start = S.started_at or S.segments[0]["ts"]
     path = TRANSCRIPT_DIR / time.strftime("%Y-%m-%d_%H%M%S.md", time.localtime(start))
     body = "\n".join(
-        f"**{s['speaker']}** ({time.strftime('%H:%M:%S', time.localtime(s['ts']))}): {s['text']}"
+        f"**{display(s['speaker'])}** ({time.strftime('%H:%M:%S', time.localtime(s['ts']))}): {s['text']}"
         for s in S.segments
     )
     c = cost_msg()
@@ -1183,7 +1206,7 @@ async def ws_endpoint(ws: WebSocket):
     S.clients.add(ws)
     await ws.send_text(json.dumps({**status_msg(), "type": "init", "segments": S.segments,
                                    "context": S.meeting_context, "keys": key_status(),
-                                   "prep": {"docs": prep_docs(), "files": S.prep_files}, **{"cost": cost_msg()}}))
+                                   "prep": {"docs": prep_docs(), "files": S.prep_files}, "names": S.names, **{"cost": cost_msg()}}))
     try:
         while True:
             msg = json.loads(await ws.receive_text())
@@ -1223,10 +1246,15 @@ async def handle(msg: dict, ws: WebSocket | None = None) -> None:
         S.summary = ""
         S.started_at = None
         S.usage, S.dg_seconds = {}, 0.0
+        S.names = {}
+        await broadcast({"type": "names", "names": S.names})
         if S.listening:
             S.started_at = time.time()
         await broadcast({"type": "cleared"})
         await broadcast(cost_msg())
+    elif action == "rename":
+        if rename_speaker(msg.get("label", ""), msg.get("name", "")):
+            await broadcast({"type": "names", "names": S.names})
     elif action == "prep":
         if "files" in msg:
             set_prep_files(msg["files"])

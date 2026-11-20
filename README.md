@@ -90,7 +90,7 @@ If it picks the wrong device, set `MIC_DEVICE=` / `SYSTEM_DEVICE=` in `.env`. Pa
 ./run.command --mic-only   # in-person: one mic, speakers separated as Speaker 1/2/3
 ```
 
-Press **Start listening**. The You / Them meters in the top right should move when you talk and when the call plays; if one stays flat for 15 seconds, the panel tells you what to check.
+Press **Start listening**. Click a speaker's name in the transcript (e.g. *Them 1*) to rename them ("Sarah, CFO"); Claude, the saved transcript and the recap all use the name. Speaker numbers come from Deepgram's diarization, so if a connection drops and reconnects mid-call, check the names still match. The You / Them meters in the top right should move when you talk and when the call plays; if one stays flat for 15 seconds, the panel tells you what to check.
 
 **Wear headphones on calls.** Otherwise your mic also picks up the other side from your speakers. If you can't, tick **Echo filter**: it drops your mic lines that repeat what the call said in the last 2 seconds.
 

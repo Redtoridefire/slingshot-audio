@@ -334,3 +334,17 @@ def test_prep_docs_selected_files_only(tmp_path, monkeypatch):
     assert C.S.prep_files == ["acme.md"]
     ctx = C.background_context()
     assert '<prep_doc name="acme.md">\nAcme is a ' in ctx and "(…truncated…)" in ctx and "Unrelated" not in ctx
+
+
+# ---------------------------------------------------------------- speaker names
+async def test_rename_speaker_flows_to_claude_and_transcript(fake_claude, sent):
+    C.S.auto_answer = False
+    await C.commit("Them 1", "We need SOC 2 by March.", "system")
+    assert C.rename_speaker("Them 1", "  Sarah,\n CFO ")
+    assert not C.rename_speaker("<script>", "x")
+    assert C.S.names == {"Them 1": "Sarah, CFO"}
+    assert "Sarah, CFO: We need SOC 2" in C.transcript_text()
+    assert "Them 1 is Sarah, CFO" in C.background_context()
+    assert "**Sarah, CFO**" in C.save_transcript().read_text()
+    C.rename_speaker("Them 1", "")
+    assert C.S.names == {}
