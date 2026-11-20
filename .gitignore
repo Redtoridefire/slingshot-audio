@@ -1,0 +1,9 @@
+.env
+.env.tmp
+.venv/
+__pycache__/
+.pytest_cache/
+transcripts/
+logs/
+tests/*.png
+tests/_shot_transcripts/

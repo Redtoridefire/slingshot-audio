@@ -19,9 +19,15 @@
   button { background: #222733; color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 6px 12px; cursor: pointer; font: inherit; }
   button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); color: #0b1020; border-color: var(--accent); font-weight: 600; }
+  button.primary kbd { color: #0b1020; border-color: rgba(11,16,32,.35); }
   button.rec { background: #2b1f22; border-color: #5a2b30; }
   label.tog { display: flex; align-items: center; gap: 5px; color: var(--muted); cursor: pointer; user-select: none; }
-  .mode { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .right { margin-left: auto; display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+  .meter { display: flex; align-items: center; gap: 4px; }
+  .meter i { display: block; width: 46px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .meter i b { display: block; height: 100%; width: 0; transition: width .15s; }
+  .meter.mic b { background: var(--you); } .meter.system b { background: var(--them); }
+  .meter.err { color: var(--danger); }
   main { flex: 1; display: grid; grid-template-columns: 1.15fr 1fr; gap: 1px; background: var(--line); min-height: 0; }
   section { background: var(--bg); display: flex; flex-direction: column; min-height: 0; }
   .col { display: flex; flex-direction: column; min-height: 0; }
@@ -38,6 +44,7 @@
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
   .card.live { border-color: var(--accent); }
   .card .meta { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .card .lat { margin-left: 6px; }
   .badge { display: inline-block; padding: 0 6px; border-radius: 4px; background: #24304a; color: var(--accent); margin-right: 6px; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; }
   .badge.auto { background: #3a2f17; color: var(--them); }
   .body { white-space: pre-wrap; }
@@ -52,6 +59,15 @@
   #toast.show { opacity: 1; } #toast.err { border-color: var(--danger); }
   .empty { color: var(--muted); padding: 8px 0; }
   kbd { font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; width: min(460px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog h3 { margin: 0 0 4px; font-size: 16px; }
+  dialog p { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+  dialog label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  dialog input { width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 8px 10px; font: inherit; }
+  .kstat { font-size: 12px; margin-left: 6px; }
+  .ok { color: var(--you); } .bad { color: var(--danger); }
+  .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 </style>
 </head>
 <body>
@@ -61,8 +77,15 @@
   <button id="answerBtn" class="primary" title="Alt+A in this window, or the global hotkey">Answer now <kbd>Alt+A</kbd></button>
   <label class="tog"><input type="checkbox" id="autoTog" checked> Auto-answer questions</label>
   <label class="tog"><input type="checkbox" id="pointsTog" checked> Talking points</label>
+  <label class="tog" title="Drops your mic lines that repeat what the call just said (use when not wearing headphones)"><input type="checkbox" id="echoTog"> Echo filter</label>
   <button id="clearBtn" title="Saves the transcript, then clears it">New conversation</button>
-  <span class="mode" id="mode"></span>
+  <div class="right">
+    <span class="meter mic" id="m_mic" title="Your mic level">You <i><b></b></i></span>
+    <span class="meter system" id="m_system" title="Call audio level">Them <i><b></b></i></span>
+    <span id="cost" title="Estimated cost of this conversation">$0.000</span>
+    <span id="mode"></span>
+    <button id="settingsBtn" title="API keys">⚙</button>
+  </div>
 </header>
 
 <main>
@@ -90,20 +113,35 @@
     </section>
   </div>
 </main>
+
+<dialog id="keysDlg">
+  <h3>API keys</h3>
+  <p>Saved to the <code>.env</code> file on this computer only (readable by your user account). Keys are never shown again or sent anywhere except Anthropic and Deepgram. Leave a box empty to keep the current key.</p>
+  <label>Anthropic API key <span class="kstat" id="k_anthropic"></span></label>
+  <input id="in_anthropic" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+  <label>Deepgram API key <span class="kstat" id="k_deepgram"></span></label>
+  <input id="in_deepgram" type="password" autocomplete="off" spellcheck="false" placeholder="from console.deepgram.com">
+  <p id="keyMsg" style="margin-top:10px"></p>
+  <div class="row">
+    <button id="testKeys">Test keys</button>
+    <button id="closeKeys">Close</button>
+    <button id="saveKeys" class="primary">Save</button>
+  </div>
+</dialog>
 <div id="toast"></div>
 
 <script>
 const $ = id => document.getElementById(id);
 const tEl = $("transcript"), aEl = $("answers"), pEl = $("points");
 const interims = {};          // source -> element
-const answers = {};           // id -> body element
-let ws, listening = false, ctxTimer;
+const answers = {};           // id -> {body, card, raw}
+let ws, listening = false, ctxTimer, keysPrompted = false;
 
 function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 function md(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/^\s*[-*] /gm, "• "); }
 function hhmm(ts) { return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
 function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
-function toast(text, err) { const t = $("toast"); t.textContent = text; t.className = "show" + (err ? " err" : ""); clearTimeout(t._h); t._h = setTimeout(() => t.className = "", err ? 6000 : 2500); }
+function toast(text, err) { const t = $("toast"); t.textContent = text; t.className = "show" + (err ? " err" : ""); clearTimeout(t._h); t._h = setTimeout(() => t.className = "", err ? 7000 : 2500); }
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
 function addSegment(s) {
@@ -111,6 +149,7 @@ function addSegment(s) {
   const stick = nearBottom(tEl);
   const div = document.createElement("div");
   div.className = "seg " + (s.source === "mic" && !s.speaker.startsWith("Speaker") ? "you" : "them");
+  if (s.id) div.dataset.id = s.id;
   div.innerHTML = `<span class="t">${hhmm(s.ts)}</span><span class="who">${esc(s.speaker)}</span>${esc(s.text)}`;
   const firstInterim = Object.values(interims).find(e => e.isConnected);
   tEl.insertBefore(div, firstInterim || null);
@@ -132,7 +171,7 @@ function answerStart(m) {
   const card = document.createElement("div");
   card.className = "card live";
   const label = { auto: "auto", hotkey: "hotkey", button: "on demand", typed: "you asked" }[m.trigger] || m.trigger;
-  card.innerHTML = `<div class="meta"><span class="badge ${m.trigger === "auto" ? "auto" : ""}">${label}</span>${hhmm(m.ts)}${m.question ? " — " + esc(m.question) : ""}</div><div class="body"></div>`;
+  card.innerHTML = `<div class="meta"><span class="badge ${m.trigger === "auto" ? "auto" : ""}">${label}</span>${hhmm(m.ts)}${m.question ? " — " + esc(m.question) : ""}<span class="lat"></span></div><div class="body"></div>`;
   aEl.prepend(card);
   answers[m.id] = { body: card.querySelector(".body"), card, raw: "" };
   aEl.scrollTop = 0;
@@ -144,8 +183,26 @@ function setStatus(m) {
   $("startBtn").textContent = listening ? "Stop listening" : "Start listening";
   $("autoTog").checked = m.auto_answer;
   $("pointsTog").checked = m.talking_points;
-  $("mode").textContent = "mode: " + m.mode;
+  $("echoTog").checked = !!m.echo_filter;
+  $("mode").textContent = m.mode;
+  if (!listening) setLevels({ mic: 0, system: 0 });
 }
+
+function setLevels(lv) {
+  for (const k of ["mic", "system"]) { const b = $("m_" + k).querySelector("b"); b.style.width = Math.round((lv[k] || 0) * 100) + "%"; }
+}
+function setCost(c) {
+  $("cost").textContent = "$" + c.total.toFixed(3);
+  $("cost").title = `Estimated cost of this conversation\nClaude: $${c.claude.toFixed(3)} (${c.tokens.in + c.tokens.cache_read + c.tokens.cache_write} in / ${c.tokens.out} out tokens, ${c.tokens.cache_read} from cache)\nDeepgram: $${c.deepgram.toFixed(3)} (${c.audio_min} min of audio)`;
+}
+
+function showKeys(keys) {
+  for (const k of ["anthropic", "deepgram"]) {
+    const s = keys[k], el = $("k_" + k);
+    el.textContent = s.set ? `set ${s.hint}` : "not set"; el.className = "kstat " + (s.set ? "ok" : "bad");
+  }
+}
+function openKeys() { $("keyMsg").textContent = ""; send({ action: "get_keys" }); if (!$("keysDlg").open) $("keysDlg").showModal(); }
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -154,17 +211,28 @@ function connect() {
     switch (m.type) {
       case "init":
         tEl.querySelectorAll(".seg").forEach(e => e.remove());
-        m.segments.forEach(addSegment); setStatus(m);
+        m.segments.forEach(addSegment); setStatus(m); setCost(m.cost); showKeys(m.keys);
         if (m.context && !$("ctx").value) $("ctx").value = m.context;
         else if ($("ctx").value) send({ action: "context", text: $("ctx").value });
+        if (!keysPrompted && (!m.keys.anthropic.set || (!m.keys.deepgram.set && m.mode !== "demo"))) { keysPrompted = true; openKeys(); }
         break;
       case "status": setStatus(m); break;
       case "interim": setInterim(m.source, m.text, m.speaker); break;
       case "final": addSegment(m); break;
+      case "retract": tEl.querySelector(`[data-id="${m.id}"]`)?.remove(); break;
       case "answer_start": answerStart(m); break;
+      case "answer_meta": { const a = answers[m.id]; if (a) a.card.querySelector(".lat").textContent = ` · first words in ${(m.latency_ms / 1000).toFixed(1)}s` + (m.from === "speech" ? " after they stopped talking" : ""); break; }
       case "answer_delta": { const a = answers[m.id]; if (a) { a.raw += m.text; a.body.innerHTML = md(a.raw); } break; }
       case "answer_end": { const a = answers[m.id]; if (a) { a.card.classList.remove("live"); if (m.cancelled && !a.raw) a.card.remove(); } break; }
       case "points": pEl.innerHTML = `<div class="card"><div class="meta">${hhmm(m.ts)}</div><div class="body">${md(m.text)}</div></div>`; break;
+      case "levels": setLevels(m.levels); break;
+      case "cost": setCost(m); break;
+      case "source": $("m_" + m.key)?.classList.toggle("err", m.state !== "live"); break;
+      case "keys": showKeys(m.keys); if (m.error) { $("keyMsg").textContent = m.error; $("keyMsg").className = "bad"; } break;
+      case "key_test": {
+        const f = r => `<span class="${r.ok ? "ok" : "bad"}">${esc(r.text)}</span>`;
+        $("keyMsg").innerHTML = `Anthropic: ${f(m.anthropic)}<br>Deepgram: ${f(m.deepgram)}`; $("keyMsg").className = ""; break;
+      }
       case "cleared": tEl.innerHTML = ""; Object.keys(interims).forEach(k => delete interims[k]); toast("Saved and cleared"); break;
       case "info": toast(m.text); break;
       case "error": toast(m.text, true); console.warn(m.text); break;
@@ -177,14 +245,24 @@ $("startBtn").onclick = () => send({ action: listening ? "stop" : "start" });
 $("answerBtn").onclick = () => send({ action: "answer" });
 $("autoTog").onchange = e => send({ action: "set", auto_answer: e.target.checked });
 $("pointsTog").onchange = e => send({ action: "set", talking_points: e.target.checked });
+$("echoTog").onchange = e => send({ action: "set", echo_filter: e.target.checked });
 $("pointsNow").onclick = () => send({ action: "points_now" });
 $("clearBtn").onclick = () => { if (confirm("Save this transcript and start a new conversation?")) send({ action: "clear" }); };
+$("settingsBtn").onclick = openKeys;
+$("closeKeys").onclick = () => $("keysDlg").close();
+$("testKeys").onclick = () => { $("keyMsg").textContent = "Testing…"; $("keyMsg").className = ""; send({ action: "test_keys" }); };
+$("saveKeys").onclick = () => {
+  const keys = { anthropic: $("in_anthropic").value.trim(), deepgram: $("in_deepgram").value.trim() };
+  $("in_anthropic").value = $("in_deepgram").value = "";
+  $("keyMsg").textContent = "Saving and testing…"; $("keyMsg").className = "";
+  send({ action: "save_keys", keys });
+};
 function ask() { const q = $("askInput").value.trim(); if (!q) return; send({ action: "answer", question: q }); $("askInput").value = ""; }
 $("askBtn").onclick = ask;
 $("askInput").onkeydown = e => { if (e.key === "Enter") ask(); };
 $("ctx").oninput = () => { clearTimeout(ctxTimer); ctxTimer = setTimeout(() => { send({ action: "context", text: $("ctx").value }); try { localStorage.setItem("copilot_ctx", $("ctx").value); } catch {} }, 400); };
 try { $("ctx").value = localStorage.getItem("copilot_ctx") || ""; } catch {}
-document.addEventListener("keydown", e => { if (e.altKey && (e.key === "a" || e.key === "A" || e.code === "KeyA")) { e.preventDefault(); send({ action: "answer" }); } });
+document.addEventListener("keydown", e => { if (e.altKey && !$("keysDlg").open && (e.key === "a" || e.key === "A" || e.code === "KeyA")) { e.preventDefault(); send({ action: "answer" }); } });
 connect();
 </script>
 </body>
