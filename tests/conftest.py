@@ -64,6 +64,8 @@ class FakeMessages:
             txt = self.verdict
         elif system == C.SYSTEM_SUMMARY:
             txt = "- They are a 200-person fintech on AWS.\n- SOC 2 readiness went badly."
+        elif system.startswith(C.SYSTEM_RECAP):
+            txt = "## Summary\n- Fintech wants SOC 2.\n## Action items\n- [ ] Me — send proposal"
         else:
             txt = "- point one\n- point two\n- point three"
         return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=txt)], usage=_usage(500, 10))

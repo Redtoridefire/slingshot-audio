@@ -296,3 +296,24 @@ async def test_save_keys_validates_and_treats_placeholder_as_unset(fake_claude, 
     assert await C.save_keys({"deepgram": "abcdef0123456789"}) is None
     assert C.get_key("deepgram") == "abcdef0123456789"
     assert C._client is None  # client rebuilt with the new key
+
+
+# ---------------------------------------------------------------- post-call summary
+async def test_recap_written_next_to_transcript(fake_claude, sent):
+    C.S.auto_answer = False
+    for t in ("We need SOC 2 by March.", "Can you send a proposal?", "Sure, I'll send it Friday."):
+        await C.commit("Them 1", t, "system")
+    path = C.save_transcript()
+    C.start_recap(path)
+    await asyncio.wait_for(C.S.recap_task, 3)
+    recap = C.recap_path(path)
+    assert recap.name.endswith(".summary.md") and "send proposal" in recap.read_text()
+    kw = [k for k in fake_claude.messages.of("create") if k["system"][0]["text"].startswith(C.SYSTEM_RECAP)][0]
+    assert "Sure, I'll send it Friday." in kw["messages"][0]["content"]
+    assert any(m["type"] == "recap" for m in sent)
+
+
+async def test_no_recap_for_tiny_or_disabled(fake_claude, sent, monkeypatch):
+    await C.commit("Them 1", "Hi", "system")
+    C.start_recap(C.save_transcript())
+    assert C.S.recap_task is None

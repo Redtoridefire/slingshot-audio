@@ -80,6 +80,7 @@ ECHO_MATCH = _env_float("ECHO_MATCH", 0.7)
 AUDIO_QUEUE_MAX = _env_int("AUDIO_QUEUE_MAX", 50)         # 100 ms chunks -> 5 s of buffered audio per source
 DG_PRICE_PER_MIN = _env_float("DEEPGRAM_PRICE_PER_MIN", 0.0077)  # check your Deepgram plan; this is an estimate
 DEMO_SPEED = _env_float("DEMO_SPEED", 1.0)
+POST_CALL_SUMMARY = os.getenv("POST_CALL_SUMMARY", "1") != "0"   # write a recap + action items when you stop
 CONTEXT_FILE = ROOT / "context.md"
 TRANSCRIPT_DIR = ROOT / "transcripts"
 LOG_DIR = ROOT / "logs"
@@ -129,6 +130,18 @@ SYSTEM_DETECT = """You classify live conversation lines. Answer only YES or NO."
 SYSTEM_SUMMARY = """You compress the earlier part of a live conversation so a real-time copilot can keep it in mind.
 Write a dense summary (at most 250 words) in plain bullets. Keep: who is who, names, numbers, dates, prices, commitments,
 questions asked (and whether they were answered), objections, decisions, and open action items. No intro."""
+
+SYSTEM_RECAP = """You write the recap of a conversation the user just had, from its live transcript (speech recognition, so expect small errors).
+Lines labeled "You" are the user. Use only what was said; never invent facts. Write "None" under a heading that has nothing.
+Markdown, exactly these sections:
+## Summary
+3–6 bullets: who was there, what was discussed, where things landed.
+## Action items
+"- [ ] Owner — task (due date if one was mentioned)". Use "Me" for the user's own items.
+## Decisions
+## Open questions
+## Follow-up email
+A short draft the user could send, in their voice."""
 
 QUESTION_HINT = re.compile(
     r"\?\s*$|^(so,?\s+)?(what|how|why|when|where|who|which|can|could|would|will|do|does|did|is|are|should|have|has|tell me|walk me|explain|any thoughts)\b",
@@ -184,6 +197,7 @@ class State:
         self.usage: dict[str, dict[str, int]] = {}
         self.dg_seconds = 0.0
         self.hotkey_proc = None
+        self.recap_task: asyncio.Task | None = None
 
 
 S = State()
@@ -563,6 +577,47 @@ async def summarize(start: int, cut: int) -> None:
         log.warning("summary failed: %s", e)
 
 
+# ---------------------------------------------------------------- post-call recap
+def recap_path(transcript: Path) -> Path:
+    return transcript.with_name(transcript.stem + ".summary.md")
+
+
+def start_recap(transcript: Path | None) -> None:
+    """Snapshot the conversation now (it may be cleared next) and write the recap in the background."""
+    if not (POST_CALL_SUMMARY and transcript and len(S.segments) >= 3):
+        return
+    text = "\n".join(fmt_line(s) for s in S.segments)
+    system = system_blocks(SYSTEM_RECAP)
+    if S.recap_task and not S.recap_task.done():
+        S.recap_task.cancel()
+    S.recap_task = asyncio.create_task(write_recap(transcript, text, system))
+
+
+async def write_recap(transcript: Path, text: str, system) -> Path | None:
+    await broadcast({"type": "info", "text": "Writing the post-call summary…"})
+    try:
+        r = await claude().messages.create(
+            model=ANSWER_MODEL, max_tokens=8000, system=system,
+            messages=[{"role": "user", "content": f"<transcript>\n{text[-400_000:]}\n</transcript>\n\nWrite the recap."}],
+            **model_opts(ANSWER_MODEL, "medium", thinking_off=False),
+        )
+        record_usage(getattr(r, "model", None) or ANSWER_MODEL, getattr(r, "usage", None))
+        recap = text_of(r)
+        if not recap:
+            raise RuntimeError(f"empty response (stop reason: {getattr(r, 'stop_reason', None)})")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        await notify_error(f"Post-call summary failed: {e}", e)
+        return None
+    path = recap_path(transcript)
+    path.write_text(f"# Recap — {transcript.stem.replace('_', ' ')}\n\n{recap}\n", encoding="utf-8")
+    log.info("recap saved: %s", path)
+    await broadcast({"type": "recap", "text": recap, "path": rel(path), "ts": time.time()})
+    await broadcast(cost_msg())
+    return path
+
+
 # ---------------------------------------------------------------- audio capture
 def list_devices() -> None:
     import soundcard as sc
@@ -897,6 +952,7 @@ async def stop_listening() -> Path | None:
     await broadcast(status_msg())
     if path:
         await broadcast({"type": "info", "text": f"Transcript saved to {rel(path)}"})
+        start_recap(path)
     return path
 
 
@@ -1056,6 +1112,12 @@ async def lifespan(_app: FastAPI):
     await stop_listening()
     if S.dirty:
         save_transcript()
+    if S.recap_task and not S.recap_task.done():
+        print("  Writing the post-call summary… (Ctrl+C again to skip)")
+        try:
+            await asyncio.wait_for(S.recap_task, 90)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
     if S.hotkey_proc and S.hotkey_proc.returncode is None:
         S.hotkey_proc.kill()
     for t in bg:
@@ -1129,7 +1191,7 @@ async def handle(msg: dict, ws: WebSocket | None = None) -> None:
     elif action == "context":
         S.meeting_context = str(msg.get("text", ""))[:20000]
     elif action == "clear":
-        save_transcript()
+        start_recap(save_transcript())
         S.segments.clear()
         S.points_mark = S.summary_upto = 0
         S.summary = ""

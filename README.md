@@ -16,6 +16,7 @@ Real-time conversation copilot: live transcript of a call → Claude → answers
 - **On screen**: audio level meters for You and Them, how fast each answer started, and a running cost estimate
 - No bot joins the call. It works with any app because it listens to your computer's audio.
 - Each transcript is saved to `transcripts/` as Markdown: every minute during a call, when you stop, on Ctrl+C, and on "New conversation".
+- **Post-call summary**: when you stop (or start a new conversation), Claude writes a recap with action items, decisions, open questions and a follow-up email draft. It's saved next to the transcript as `….summary.md` and shown in the panel.
 - Everything runs on your computer. The panel is only reachable from this machine (127.0.0.1), and no telemetry is sent.
 
 ## 1. Start it
@@ -107,6 +108,7 @@ Stop with **Stop listening** or Ctrl+C in the terminal; both save the transcript
 | `RECENT_CHARS` | 12000 | How much recent conversation stays word for word (older parts are summarized) |
 | `DEEPGRAM_MODEL` | `nova-3` | Speech-to-text model |
 | `DEEPGRAM_PRICE_PER_MIN` | 0.0077 | Used only for the cost estimate; set it to your plan's price |
+| `POST_CALL_SUMMARY` | 1 | 0 = don't write the recap when you stop |
 | `CLAUDE_FALLBACKS` | 1 | If Claude declines a request, retry it on another model server-side |
 | `LOG_LEVEL` | INFO | `DEBUG` also logs each transcript line |
 

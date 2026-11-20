@@ -58,6 +58,8 @@ async def test_demo_flow(server, fake_claude):
     assert "Call with fintech CFO" in last["system"][0]["text"]
     assert "What should I charge?" in content_text(last)
     assert list(C.TRANSCRIPT_DIR.glob("*.md"))
+    await asyncio.wait_for(C.S.recap_task, 3)
+    assert list(C.TRANSCRIPT_DIR.glob("*.summary.md"))
 
 
 async def test_rejects_other_websites(server):

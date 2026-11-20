@@ -224,6 +224,13 @@ function connect() {
       case "answer_meta": { const a = answers[m.id]; if (a) a.card.querySelector(".lat").textContent = ` · first words in ${(m.latency_ms / 1000).toFixed(1)}s` + (m.from === "speech" ? " after they stopped talking" : ""); break; }
       case "answer_delta": { const a = answers[m.id]; if (a) { a.raw += m.text; a.body.innerHTML = md(a.raw); } break; }
       case "answer_end": { const a = answers[m.id]; if (a) { a.card.classList.remove("live"); if (m.cancelled && !a.raw) a.card.remove(); } break; }
+      case "recap": {
+        $("aEmpty")?.remove();
+        aEl.querySelectorAll(".card").forEach(c => c.classList.add("old"));
+        const card = document.createElement("div"); card.className = "card";
+        card.innerHTML = `<div class="meta"><span class="badge">post-call summary</span>${hhmm(m.ts)} · saved to ${esc(m.path)}</div><div class="body"></div>`;
+        card.querySelector(".body").innerHTML = md(m.text.replace(/^## /gm, "")); aEl.prepend(card); aEl.scrollTop = 0; break;
+      }
       case "points": pEl.innerHTML = `<div class="card"><div class="meta">${hhmm(m.ts)}</div><div class="body">${md(m.text)}</div></div>`; break;
       case "levels": setLevels(m.levels); break;
       case "cost": setCost(m); break;
