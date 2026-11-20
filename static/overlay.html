@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Copilot</title>
+<style>
+  :root { --bg: #0f1115; --panel: #171a21; --line: #262a33; --text: #e6e8ec; --muted: #8b93a1; --accent: #6ea8fe; --them: #f5c26b; --danger: #ff6b6b; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+  button { background: #222733; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; font: 13px/1.4 inherit; font-family: inherit; }
+  button.primary { background: var(--accent); color: #0b1020; border-color: var(--accent); font-weight: 600; }
+  .sp { flex: 1; }
+  #meta { font-size: 11px; color: var(--muted); padding: 8px 12px 0; }
+  .badge { display: inline-block; padding: 0 5px; border-radius: 4px; background: #24304a; color: var(--accent); margin-right: 5px; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; }
+  .badge.auto { background: #3a2f17; color: var(--them); }
+  #body { flex: 1; overflow-y: auto; padding: 4px 12px 12px; white-space: pre-wrap; }
+  #body b { color: #fff; }
+  #body.live { border-left: 2px solid var(--accent); }
+  .empty { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <button id="startBtn">Start</button>
+  <button id="answerBtn" class="primary" title="Alt+A">Answer now</button>
+  <span class="sp"></span>
+  <button id="panelBtn" title="Open the full panel in your browser">Full panel ⤢</button>
+</header>
+<div id="meta"></div>
+<div id="body"><span class="empty">The latest answer shows here. Press “Start” to listen.</span></div>
+<script>
+const $ = id => document.getElementById(id);
+let ws, listening = false, current = null, raw = "";
+function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function md(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/^\s*[-*] /gm, "• ").replace(/^#+ /gm, ""); }
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function status(m) { listening = m.listening; $("dot").classList.toggle("on", listening); $("startBtn").textContent = listening ? "Stop" : "Start"; }
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "init" || m.type === "status") status(m);
+    else if (m.type === "answer_start") {
+      current = m.id; raw = "";
+      const label = { auto: "auto", hotkey: "hotkey", button: "on demand", typed: "you asked" }[m.trigger] || m.trigger;
+      $("meta").innerHTML = `<span class="badge ${m.trigger === "auto" ? "auto" : ""}">${label}</span>${m.question ? esc(m.question) : ""}<span id="lat"></span>`;
+      $("body").innerHTML = ""; $("body").classList.add("live");
+    } else if (m.type === "answer_meta" && m.id === current) {
+      const l = $("lat"); if (l) l.textContent = ` · ${(m.latency_ms / 1000).toFixed(1)}s`;
+    } else if (m.type === "answer_delta" && m.id === current) {
+      raw += m.text; $("body").innerHTML = md(raw);
+    } else if (m.type === "answer_end" && m.id === current) {
+      $("body").classList.remove("live");
+    } else if (m.type === "recap") {
+      current = null; $("meta").innerHTML = `<span class="badge">post-call summary</span>${esc(m.path)}`; $("body").innerHTML = md(m.text);
+    } else if (m.type === "error") {
+      $("meta").innerHTML = `<span style="color:var(--danger)">${esc(m.text)}</span>`;
+    }
+  };
+  ws.onclose = () => { $("dot").classList.remove("on"); setTimeout(connect, 1500); };
+}
+$("startBtn").onclick = () => send({ action: listening ? "stop" : "start" });
+$("answerBtn").onclick = () => send({ action: "answer" });
+$("panelBtn").onclick = () => send({ action: "open_panel" });
+document.addEventListener("keydown", e => { if (e.altKey && (e.key === "a" || e.key === "A" || e.code === "KeyA")) { e.preventDefault(); send({ action: "answer" }); } });
+connect();
+</script>
+</body>
+</html>

@@ -96,6 +96,12 @@ Press **Start listening**. Click a speaker's name in the transcript (e.g. *Them 
 
 Stop with **Stop listening** or Ctrl+C in the terminal; both save the transcript.
 
+### Overlay instead of a browser tab
+```bash
+./run.command --overlay    # Windows: run.bat --overlay
+```
+Opens a small always-on-top window with Start/Stop, **Answer now** and the latest answer, so it can sit next to Zoom/Teams. **Full panel ⤢** opens the full panel in your browser when you need the transcript or settings. The first time, it installs `pywebview` automatically. Closing the window quits the app (transcript and recap are saved).
+
 ## Tuning (`.env`)
 
 | Setting | Default | What it does |

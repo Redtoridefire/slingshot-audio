@@ -99,3 +99,36 @@ async def test_keys_saved_but_never_sent_back(server, monkeypatch):
 
 async def _ok():
     return {"ok": True, "text": "OK"}
+
+
+async def test_overlay_page_served(server):
+    html = await asyncio.to_thread(lambda: urllib.request.urlopen(f"http://127.0.0.1:{server}/overlay").read().decode())
+    assert "Answer now" in html and "/ws" in html
+
+
+def test_overlay_window_runs_server_in_thread_and_shuts_down(fake_claude, monkeypatch):
+    """pywebview needs a desktop; stub it and check the server lifecycle around the window."""
+    import sys
+    import types
+
+    seen = {}
+
+    def create_window(title, url, **kw):
+        seen["url"], seen["kw"] = url, kw
+        return types.SimpleNamespace(destroy=lambda: None)
+
+    def start():  # the window "runs": the server must be up and serving the overlay
+        seen["page"] = urllib.request.urlopen(seen["url"]).read().decode()
+
+    monkeypatch.setitem(sys.modules, "webview", types.SimpleNamespace(create_window=create_window, start=start))
+    port = free_port()
+    C.S.port = port
+    srv = uvicorn.Server(uvicorn.Config(C.app, host="127.0.0.1", port=port, log_level="warning"))
+    import signal
+    old = signal.getsignal(signal.SIGINT)
+    try:
+        C.run_with_overlay(srv, f"http://127.0.0.1:{port}")
+    finally:
+        signal.signal(signal.SIGINT, old)
+    assert seen["kw"]["on_top"] is True and "Answer now" in seen["page"]
+    assert srv.should_exit

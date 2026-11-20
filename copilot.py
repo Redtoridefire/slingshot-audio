@@ -1196,6 +1196,11 @@ async def index():
     return FileResponse(ROOT / "static" / "index.html")
 
 
+@app.get("/overlay")
+async def overlay():
+    return FileResponse(ROOT / "static" / "overlay.html")
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     if ws.headers.get("host") not in local_hosts() or not origin_ok(ws.headers.get("origin")):
@@ -1252,6 +1257,8 @@ async def handle(msg: dict, ws: WebSocket | None = None) -> None:
             S.started_at = time.time()
         await broadcast({"type": "cleared"})
         await broadcast(cost_msg())
+    elif action == "open_panel":
+        webbrowser.open(f"http://127.0.0.1:{S.port}/")
     elif action == "rename":
         if rename_speaker(msg.get("label", ""), msg.get("name", "")):
             await broadcast({"type": "names", "names": S.names})
@@ -1397,6 +1404,52 @@ def _finish_check(lines: list[str], problems: int) -> int:
     return 1 if problems else 0
 
 
+def ensure_extras(overlay: bool) -> None:
+    """Install optional packages the chosen features need, once (keeps the base install small)."""
+    import importlib.util
+    import subprocess
+
+    wanted = []
+    if overlay:
+        wanted.append(("webview", "pywebview>=5"))
+    missing = [pkg for mod, pkg in wanted if importlib.util.find_spec(mod) is None]
+    if not missing or getattr(sys, "frozen", False):
+        return
+    print(f"  Installing {', '.join(missing)} (one time)…")
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", *missing])
+    if r.returncode:
+        print(f"  ! Could not install {', '.join(missing)}; continuing without it.")
+        log.warning("installing extras failed: %s", missing)
+
+
+def run_with_overlay(server: uvicorn.Server, url: str) -> None:
+    """Server in a background thread; an always-on-top pywebview window on the main thread (GUI toolkits need it)."""
+    try:
+        import webview
+    except ImportError:
+        print("  ! The overlay window needs pywebview (pip install pywebview). Opening it in your browser instead.")
+        threading.Timer(1.5, webbrowser.open, args=(url + "/overlay",)).start()
+        server.run()
+        return
+    import signal
+
+    t = threading.Thread(target=server.run, name="server", daemon=True)
+    t.start()
+    for _ in range(200):
+        if server.started or not t.is_alive():
+            break
+        time.sleep(0.05)
+    if not server.started:
+        raise SystemExit("server failed to start (is the port in use?)")
+    win = webview.create_window("Live Copilot", url + "/overlay", width=440, height=320, on_top=True,
+                                resizable=True, min_size=(300, 180))
+    signal.signal(signal.SIGINT, lambda *_: win.destroy())
+    print("  Overlay window open (always on top). Close it or press Ctrl+C to quit.")
+    webview.start()
+    server.should_exit = True  # window closed: shut down cleanly (saves transcript, writes recap)
+    t.join(timeout=120)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Live Copilot: real-time transcript -> Claude")
     ap.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
@@ -1406,6 +1459,7 @@ def main() -> None:
     ap.add_argument("--prep", default="", help="comma-separated files from context/ to load for this meeting")
     ap.add_argument("--port", type=int, default=_env_int("PORT", 8765))
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--overlay", action="store_true", help="small always-on-top window with the latest answer")
     ap.add_argument("--hotkey-child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
@@ -1420,6 +1474,7 @@ def main() -> None:
     if args.prep:
         set_prep_files([x.strip() for x in args.prep.split(",")])
         print(f"  Prep docs: {', '.join(S.prep_files) or 'none found in context/'}")
+    ensure_extras(args.overlay)
     if args.check:
         sys.exit(asyncio.run(self_check()))
 
@@ -1433,12 +1488,15 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.port}"
     print(f"  Panel: {url}\n  Mode: {status_msg()['mode']}   Models: {ANSWER_MODEL} (answers), {FAST_MODEL} (detect/points)")
     print(f"  Log: {rel(LOG_DIR / 'copilot.log')}   Stop with Ctrl+C (the transcript is saved)")
-    if not args.no_browser:
+    if not args.no_browser and not args.overlay:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="warning",
                                            timeout_graceful_shutdown=3))
     try:
-        server.run()
+        if args.overlay:
+            run_with_overlay(server, url)
+        else:
+            server.run()
     except KeyboardInterrupt:
         pass
     finally:
