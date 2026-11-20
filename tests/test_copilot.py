@@ -317,3 +317,20 @@ async def test_no_recap_for_tiny_or_disabled(fake_claude, sent, monkeypatch):
     await C.commit("Them 1", "Hi", "system")
     C.start_recap(C.save_transcript())
     assert C.S.recap_task is None
+
+
+# ---------------------------------------------------------------- prep docs
+def test_prep_docs_selected_files_only(tmp_path, monkeypatch):
+    C.reset_state()
+    d = tmp_path / "context"
+    d.mkdir()
+    (d / "acme.md").write_text("Acme is a 200-person fintech.")
+    (d / "other.txt").write_text("Unrelated notes.")
+    (d / "image.png").write_bytes(b"x")
+    monkeypatch.setattr(C, "PREP_DIR", d)
+    monkeypatch.setattr(C, "PREP_MAX_CHARS", 10)
+    assert [x["name"] for x in C.prep_docs()] == ["acme.md", "other.txt"]
+    C.set_prep_files(["acme.md", "../.env", "image.png", "acme.md"])
+    assert C.S.prep_files == ["acme.md"]
+    ctx = C.background_context()
+    assert '<prep_doc name="acme.md">\nAcme is a ' in ctx and "(…truncated…)" in ctx and "Unrelated" not in ctx

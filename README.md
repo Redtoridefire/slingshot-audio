@@ -35,6 +35,8 @@ The first run sets everything up (a minute or two); later runs start in seconds.
 
 Edit `context.md` with your background. Claude reads it before every answer.
 
+**Prep docs for a meeting:** put Markdown or text files in the `context/` folder (a prospect's background, your notes, a proposal), then tick them in the panel under *Context for this conversation*, or start with `./run.command --prep acme.md,pricing.md`. Ticked files are added to what Claude knows for this conversation and re-read on every answer, so edits apply mid-call. See `context/example-prospect.md`. Files in `context/` are kept out of git.
+
 The launchers pass options through: `./run.command --demo`, `run.bat --check`, and so on.
 
 <details><summary>Manual setup instead of the launchers</summary>

@@ -58,6 +58,9 @@
   #toast { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); background: #2a2f3a; border: 1px solid var(--line); padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; max-width: 80vw; }
   #toast.show { opacity: 1; } #toast.err { border-color: var(--danger); }
   .empty { color: var(--muted); padding: 8px 0; }
+  .prep { font-size: 12px; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+  .prep label { display: inline-flex; gap: 4px; align-items: center; color: var(--text); cursor: pointer; }
+  .prep a { color: var(--accent); }
   kbd { font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; width: min(460px, 92vw); }
   dialog::backdrop { background: rgba(0,0,0,.55); }
@@ -95,6 +98,7 @@
     <details>
       <summary>Context for this conversation (who, goal, what you want to get across)</summary>
       <textarea id="ctx" placeholder="e.g. Intro call with CFO of a 200-person fintech. Goal: scope a fractional CISO engagement, position SOC 2 readiness in 90 days."></textarea>
+      <div class="prep"><span>Prep docs from the <code>context/</code> folder:</span> <span id="prepList"></span> <a href="#" id="prepRefresh">refresh</a></div>
     </details>
   </section>
 
@@ -204,6 +208,17 @@ function showKeys(keys) {
 }
 function openKeys() { $("keyMsg").textContent = ""; send({ action: "get_keys" }); if (!$("keysDlg").open) $("keysDlg").showModal(); }
 
+function showPrep(p) {
+  const el = $("prepList");
+  if (!p.docs.length) { el.innerHTML = "<i>none yet — put .md or .txt files there</i>"; return; }
+  el.innerHTML = p.docs.map(d => `<label title="${d.kb} KB"><input type="checkbox" value="${esc(d.name)}" ${p.files.includes(d.name) ? "checked" : ""}>${esc(d.name)}</label>`).join("");
+  el.querySelectorAll("input").forEach(i => i.onchange = () => {
+    const files = [...el.querySelectorAll("input:checked")].map(x => x.value);
+    try { localStorage.setItem("copilot_prep", JSON.stringify(files)); } catch {}
+    send({ action: "prep", files });
+  });
+}
+
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onmessage = ev => {
@@ -214,9 +229,12 @@ function connect() {
         m.segments.forEach(addSegment); setStatus(m); setCost(m.cost); showKeys(m.keys);
         if (m.context && !$("ctx").value) $("ctx").value = m.context;
         else if ($("ctx").value) send({ action: "context", text: $("ctx").value });
+        showPrep(m.prep);
+        if (!m.prep.files.length) { let saved = []; try { saved = JSON.parse(localStorage.getItem("copilot_prep") || "[]"); } catch {} if (saved.length) send({ action: "prep", files: saved }); }
         if (!keysPrompted && (!m.keys.anthropic.set || (!m.keys.deepgram.set && m.mode !== "demo"))) { keysPrompted = true; openKeys(); }
         break;
       case "status": setStatus(m); break;
+      case "prep": showPrep(m); break;
       case "interim": setInterim(m.source, m.text, m.speaker); break;
       case "final": addSegment(m); break;
       case "retract": tEl.querySelector(`[data-id="${m.id}"]`)?.remove(); break;
@@ -256,6 +274,7 @@ $("echoTog").onchange = e => send({ action: "set", echo_filter: e.target.checked
 $("pointsNow").onclick = () => send({ action: "points_now" });
 $("clearBtn").onclick = () => { if (confirm("Save this transcript and start a new conversation?")) send({ action: "clear" }); };
 $("settingsBtn").onclick = openKeys;
+$("prepRefresh").onclick = e => { e.preventDefault(); send({ action: "prep" }); };
 $("closeKeys").onclick = () => $("keysDlg").close();
 $("testKeys").onclick = () => { $("keyMsg").textContent = "Testing…"; $("keyMsg").className = ""; send({ action: "test_keys" }); };
 $("saveKeys").onclick = () => {

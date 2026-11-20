@@ -7,3 +7,5 @@ transcripts/
 logs/
 tests/*.png
 tests/_shot_transcripts/
+context/*
+!context/example-prospect.md

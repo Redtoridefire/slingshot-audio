@@ -82,6 +82,8 @@ DG_PRICE_PER_MIN = _env_float("DEEPGRAM_PRICE_PER_MIN", 0.0077)  # check your De
 DEMO_SPEED = _env_float("DEMO_SPEED", 1.0)
 POST_CALL_SUMMARY = os.getenv("POST_CALL_SUMMARY", "1") != "0"   # write a recap + action items when you stop
 CONTEXT_FILE = ROOT / "context.md"
+PREP_DIR = ROOT / "context"            # prep docs (prospect background, notes) you can switch on per meeting
+PREP_MAX_CHARS = _env_int("PREP_MAX_CHARS", 60000)
 TRANSCRIPT_DIR = ROOT / "transcripts"
 LOG_DIR = ROOT / "logs"
 
@@ -170,6 +172,7 @@ class State:
         self.talking_points = True
         self.echo_filter = os.getenv("ECHO_FILTER", "0") == "1"
         self.meeting_context = ""
+        self.prep_files: list[str] = []
         self.mic_only = False
         self.demo = False
         self.port = _env_int("PORT", 8765)
@@ -325,6 +328,20 @@ def transcript_blocks() -> list[dict]:
     return blocks
 
 
+def prep_docs() -> list[dict]:
+    """Markdown / text files in context/ that can be switched on for a meeting."""
+    if not PREP_DIR.is_dir():
+        return []
+    return [{"name": p.name, "kb": max(1, p.stat().st_size // 1024)}
+            for p in sorted(PREP_DIR.iterdir(), key=lambda p: p.name.lower())
+            if p.is_file() and p.suffix.lower() in (".md", ".txt") and not p.name.startswith(".")]
+
+
+def set_prep_files(names) -> None:
+    available = {d["name"] for d in prep_docs()}
+    S.prep_files = [n for n in dict.fromkeys(names or []) if isinstance(n, str) and n in available]
+
+
 def background_context() -> str:
     parts = []
     try:
@@ -333,6 +350,14 @@ def background_context() -> str:
             parts.append(f"<about_me>\n{file_ctx}\n</about_me>")
     except FileNotFoundError:
         pass
+    for name in S.prep_files:  # re-read every call, so edits apply mid-call
+        try:
+            doc = (PREP_DIR / name).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if len(doc) > PREP_MAX_CHARS:
+            doc = doc[:PREP_MAX_CHARS] + "\n(…truncated…)"
+        parts.append(f'<prep_doc name="{name}">\n{doc}\n</prep_doc>')
     if S.meeting_context.strip():
         parts.append(f"<this_conversation>\n{S.meeting_context.strip()}\n</this_conversation>")
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
@@ -1157,7 +1182,8 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     S.clients.add(ws)
     await ws.send_text(json.dumps({**status_msg(), "type": "init", "segments": S.segments,
-                                   "context": S.meeting_context, "keys": key_status(), **{"cost": cost_msg()}}))
+                                   "context": S.meeting_context, "keys": key_status(),
+                                   "prep": {"docs": prep_docs(), "files": S.prep_files}, **{"cost": cost_msg()}}))
     try:
         while True:
             msg = json.loads(await ws.receive_text())
@@ -1201,6 +1227,11 @@ async def handle(msg: dict, ws: WebSocket | None = None) -> None:
             S.started_at = time.time()
         await broadcast({"type": "cleared"})
         await broadcast(cost_msg())
+    elif action == "prep":
+        if "files" in msg:
+            set_prep_files(msg["files"])
+            log.info("prep docs for this conversation: %s", S.prep_files or "none")
+        await broadcast({"type": "prep", "docs": prep_docs(), "files": S.prep_files})
     elif action == "get_keys":
         await reply({"type": "keys", "keys": key_status()})
     elif action == "save_keys":
@@ -1344,6 +1375,7 @@ def main() -> None:
     ap.add_argument("--check", action="store_true", help="test keys, models, audio devices and Deepgram, then exit")
     ap.add_argument("--mic-only", action="store_true", help="in-person mode: one mic, speakers separated by diarization")
     ap.add_argument("--demo", action="store_true", help="play a scripted conversation (no audio or Deepgram needed)")
+    ap.add_argument("--prep", default="", help="comma-separated files from context/ to load for this meeting")
     ap.add_argument("--port", type=int, default=_env_int("PORT", 8765))
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--hotkey-child", action="store_true", help=argparse.SUPPRESS)
@@ -1357,6 +1389,9 @@ def main() -> None:
         return
     setup_logging()
     S.mic_only, S.demo, S.port = args.mic_only, args.demo, args.port
+    if args.prep:
+        set_prep_files([x.strip() for x in args.prep.split(",")])
+        print(f"  Prep docs: {', '.join(S.prep_files) or 'none found in context/'}")
     if args.check:
         sys.exit(asyncio.run(self_check()))
 
